@@ -7,23 +7,21 @@ Supports:
     --historical     : Ingest curated seasonal baseline reference sample fixture
     --use-fixture    : Ingest offline baseline fixture
 """
-import sys
-import os
 import argparse
 import asyncio
-from datetime import datetime, timezone
-from pathlib import Path
+import os
+import sys
 
 # Add backend directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../backend")))
 
-from app.core.logging import logger
-from app.providers.data.open_meteo import OpenMeteoMarineClient
-from app.providers.data.historical_marine import HistoricalMarineDataLoader
-from app.db.session import AsyncSessionLocal
 from app.db.repositories.marine import MarineRepository
+from app.db.session import AsyncSessionLocal
+from app.providers.data.historical_marine import HistoricalMarineDataLoader
+from app.providers.data.open_meteo import OpenMeteoMarineClient
 
-async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str = None):
+
+async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str | None = None):
     print("=" * 70)
     print("ORCA Marine Data Foundation — Ingestion Pipeline")
     print(f"Target Coordinates : {lat:.4f}°N, {lon:.4f}°E (WGS84)")
@@ -39,7 +37,7 @@ async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str = No
         loader = HistoricalMarineDataLoader(custom_file)
         print(f"Loading historical dataset from: {loader.data_path}")
         validated_records, evidence, parse_counts = loader.load_local_dataset()
-        print(f"Dataset Validation Summary:")
+        print("Dataset Validation Summary:")
         print(f"  • Total Read   : {parse_counts['processed']}")
         print(f"  • Valid Format : {parse_counts['valid']}")
         print(f"  • Rejected     : {parse_counts['rejected']}")
@@ -120,8 +118,8 @@ async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str = No
             print(f"  • Failed    : {counts['failed']}")
             print("-" * 70)
             print("✓ Database ingestion executed successfully.")
-    except Exception as e:
-        print(f"\n[PostgreSQL Status] Database write unavailable ({str(e)}).")
+    except Exception as e:  # noqa: BLE001
+        print(f"\n[PostgreSQL Status] Database write unavailable ({e}).")
         print("Pipeline verified in decoupled/offline mode.")
 
 def main():

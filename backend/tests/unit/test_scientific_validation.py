@@ -1,16 +1,12 @@
-import math
-import pytest
-from datetime import datetime, timezone
+from datetime import datetime
 
 from app.agents.ocean_research.calculations import (
-    compute_series_stats,
-    get_indian_ocean_season,
-    compute_seasonal_breakdown,
     compare_time_periods,
-    compare_locations,
+    compute_series_stats,
     detect_anomalies,
-    validate_unit_compatibility,
     filter_and_clean_observations,
+    get_indian_ocean_season,
+    validate_unit_compatibility,
 )
 from app.utils import haversine_distance_km
 

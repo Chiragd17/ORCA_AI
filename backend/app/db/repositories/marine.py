@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any, Tuple
-from sqlalchemy import select, and_
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.models.marine import DataSource, MarineObservation
 from app.utils import haversine_distance_km
 
-Tuple_Result = Tuple[str, MarineObservation]
+Tuple_Result = tuple[str, MarineObservation]
 
 
 class MarineRepository:
@@ -23,9 +25,9 @@ class MarineRepository:
         self,
         source_id: str,
         name: str,
-        base_url: Optional[str] = None,
-        description: Optional[str] = None,
-        license_info: Optional[str] = None,
+        base_url: str | None = None,
+        description: str | None = None,
+        license_info: str | None = None,
     ) -> DataSource:
         stmt = select(DataSource).where(DataSource.id == source_id)
         result = await self.session.execute(stmt)
@@ -37,7 +39,7 @@ class MarineRepository:
                 base_url=base_url,
                 description=description,
                 license_info=license_info,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
             self.session.add(source)
             await self.session.flush()
@@ -49,21 +51,21 @@ class MarineRepository:
         observation_time: datetime,
         latitude: float,
         longitude: float,
-        sea_surface_temperature_celsius: Optional[float] = None,
-        wave_height_meters: Optional[float] = None,
-        wave_period_seconds: Optional[float] = None,
-        wave_direction_degrees: Optional[float] = None,
-        wind_speed_knots: Optional[float] = None,
-        wind_direction_degrees: Optional[float] = None,
-        chlorophyll_mg_m3: Optional[float] = None,
-        metadata_json: Optional[dict] = None,
+        sea_surface_temperature_celsius: float | None = None,
+        wave_height_meters: float | None = None,
+        wave_period_seconds: float | None = None,
+        wave_direction_degrees: float | None = None,
+        wind_speed_knots: float | None = None,
+        wind_direction_degrees: float | None = None,
+        chlorophyll_mg_m3: float | None = None,
+        metadata_json: dict | None = None,
     ) -> Tuple_Result:
         """
         Idempotent insert or update based on (source_id, observation_time, latitude, longitude).
         """
         # Ensure UTC timezone
         if observation_time.tzinfo is None:
-            observation_time = observation_time.replace(tzinfo=timezone.utc)
+            observation_time = observation_time.replace(tzinfo=UTC)
 
         stmt = select(MarineObservation).where(
             and_(
@@ -102,12 +104,12 @@ class MarineRepository:
                 wind_direction_degrees=wind_direction_degrees,
                 chlorophyll_mg_m3=chlorophyll_mg_m3,
                 metadata_json=metadata_json or {},
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
             self.session.add(obs)
             return "inserted", obs
 
-    async def bulk_ingest(self, records: List[Dict[str, Any]]) -> Dict[str, int]:
+    async def bulk_ingest(self, records: list[dict[str, Any]]) -> dict[str, int]:
         counts = {"processed": len(records), "inserted": 0, "updated": 0, "failed": 0}
         for r in records:
             try:
@@ -126,9 +128,9 @@ class MarineRepository:
         latitude: float,
         longitude: float,
         radius_km: float = 50.0,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-    ) -> List[MarineObservation]:
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> list[MarineObservation]:
         """
         Retrieves marine observations filtered by time and approximate bounding box,
         then refined by deterministic great-circle Haversine distance.

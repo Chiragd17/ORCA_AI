@@ -1,14 +1,12 @@
-import math
-from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional, Tuple, Set
+from datetime import UTC, datetime
+from typing import Any
 
+from app.agents.ocean_research.calculations import validate_geographic_coordinates
 from app.db.repositories.marine import MarineRepository
-from app.models.marine import MarineObservation
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
 from app.utils import haversine_distance_km
-from app.agents.ocean_research.calculations import validate_geographic_coordinates
 
-SUPPORTED_MARINE_VARIABLES: Set[str] = {
+SUPPORTED_MARINE_VARIABLES: set[str] = {
     "sea_surface_temperature_celsius",
     "wave_height_meters",
     "wave_period_seconds",
@@ -17,7 +15,7 @@ SUPPORTED_MARINE_VARIABLES: Set[str] = {
     "wind_direction_degrees",
 }
 
-VARIABLE_ALIASES: Dict[str, str] = {
+VARIABLE_ALIASES: dict[str, str] = {
     "sst": "sea_surface_temperature_celsius",
     "sea_surface_temperature": "sea_surface_temperature_celsius",
     "temperature": "sea_surface_temperature_celsius",
@@ -30,7 +28,7 @@ VARIABLE_ALIASES: Dict[str, str] = {
     "wind_direction": "wind_direction_degrees",
 }
 
-VARIABLE_UNITS: Dict[str, str] = {
+VARIABLE_UNITS: dict[str, str] = {
     "sea_surface_temperature_celsius": "°C",
     "wave_height_meters": "m",
     "wave_period_seconds": "s",
@@ -48,13 +46,13 @@ class MarineResearchQueryService:
     """
     def __init__(
         self,
-        repository: Optional[MarineRepository] = None,
-        historical_loader: Optional[HistoricalMarineDataLoader] = None,
+        repository: MarineRepository | None = None,
+        historical_loader: HistoricalMarineDataLoader | None = None,
     ):
         self.repository = repository
         self.historical_loader = historical_loader or HistoricalMarineDataLoader()
 
-    def canonicalize_variable(self, variable_name: str) -> Optional[str]:
+    def canonicalize_variable(self, variable_name: str) -> str | None:
         """Resolves alias or canonical variable name."""
         cleaned = variable_name.strip().lower()
         if cleaned in SUPPORTED_MARINE_VARIABLES:
@@ -63,13 +61,13 @@ class MarineResearchQueryService:
 
     def validate_query_parameters(
         self,
-        latitude: Optional[float],
-        longitude: Optional[float],
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-        variables: Optional[List[str]] = None,
+        latitude: float | None,
+        longitude: float | None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        variables: list[str] | None = None,
         radius_km: float = 50.0,
-    ) -> Tuple[bool, List[str]]:
+    ) -> tuple[bool, list[str]]:
         """
         Validates spatial coordinates, time window ordering, radius limits, and supported variables.
         """
@@ -83,8 +81,8 @@ class MarineResearchQueryService:
 
         if start_time and end_time:
             # Ensure timezone-aware UTC comparison
-            st = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
-            et = end_time if end_time.tzinfo else end_time.replace(tzinfo=timezone.utc)
+            st = start_time if start_time.tzinfo else start_time.replace(tzinfo=UTC)
+            et = end_time if end_time.tzinfo else end_time.replace(tzinfo=UTC)
             if st > et:
                 errors.append(
                     f"Invalid temporal range: start_time ({st.isoformat()}) must not be after end_time ({et.isoformat()})."
@@ -105,9 +103,9 @@ class MarineResearchQueryService:
         latitude: float,
         longitude: float,
         radius_km: float = 50.0,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-    ) -> List[Dict[str, Any]]:
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> list[dict[str, Any]]:
         """Filters local historical dataset by spatial radius and temporal window."""
         all_hist, _, _ = self.historical_loader.load_local_dataset()
         filtered = []
@@ -118,11 +116,11 @@ class MarineResearchQueryService:
             if dist_km <= radius_km:
                 obs_t = r["observation_time"]
                 if start_time:
-                    st = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
+                    st = start_time if start_time.tzinfo else start_time.replace(tzinfo=UTC)
                     if obs_t < st:
                         continue
                 if end_time:
-                    et = end_time if end_time.tzinfo else end_time.replace(tzinfo=timezone.utc)
+                    et = end_time if end_time.tzinfo else end_time.replace(tzinfo=UTC)
                     if obs_t > et:
                         continue
                 filtered.append(r)
@@ -133,9 +131,9 @@ class MarineResearchQueryService:
         latitude: float,
         longitude: float,
         radius_km: float = 50.0,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-    ) -> Tuple[List[Dict[str, Any]], str]:
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> tuple[list[dict[str, Any]], str]:
         """
         Retrieves observation records for a given geographic point and radius.
         Returns:

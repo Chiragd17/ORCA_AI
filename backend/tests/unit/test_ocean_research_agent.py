@@ -1,29 +1,28 @@
-import math
-import pytest
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime
 
+import pytest
+
+from app.agents.base import AgentStatus, InvestigationTask
+from app.agents.ocean_research.agent import OceanResearchAgent
 from app.agents.ocean_research.calculations import (
-    compute_series_stats,
-    get_indian_ocean_season,
-    compute_seasonal_breakdown,
-    compare_time_periods,
     compare_locations,
+    compare_time_periods,
+    compute_seasonal_breakdown,
+    compute_series_stats,
     detect_anomalies,
+    filter_and_clean_observations,
+    get_indian_ocean_season,
     validate_geographic_coordinates,
     validate_unit_compatibility,
-    filter_and_clean_observations,
 )
 from app.agents.ocean_research.queries import (
     MarineResearchQueryService,
-    SUPPORTED_MARINE_VARIABLES,
 )
-from app.providers.data.open_meteo import OpenMeteoMarineClient
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
+from app.providers.data.open_meteo import OpenMeteoMarineClient
 from app.providers.llm.base import BaseLLMProvider
-from app.agents.ocean_research.agent import OceanResearchAgent
-from app.agents.base import InvestigationTask, AgentStatus, AgentResult
+from app.schemas.evidence import FindingCategory, VerificationStatus
 from app.schemas.investigations import WorkspaceType
-from app.schemas.evidence import VerificationStatus, FindingCategory, Finding, EvidenceRecord
 
 # -----------------------------------------------------------------------------
 # 1. Query Parameter & Variable Validation Tests
@@ -59,8 +58,8 @@ def test_query_service_parameters():
     service = MarineResearchQueryService()
 
     # Valid parameters
-    t_start = datetime(2025, 6, 1, tzinfo=timezone.utc)
-    t_end = datetime(2025, 9, 30, tzinfo=timezone.utc)
+    t_start = datetime(2025, 6, 1, tzinfo=UTC)
+    t_end = datetime(2025, 9, 30, tzinfo=UTC)
     ok, errs = service.validate_query_parameters(
         latitude=12.87,
         longitude=74.88,
@@ -123,10 +122,10 @@ def test_compute_series_stats_never_treats_missing_as_zero():
 
 def test_compute_series_stats_temporal_coverage_and_gaps():
     times = [
-        datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
-        datetime(2026, 6, 1, 6, 0, tzinfo=timezone.utc),   # 6h gap (normal)
-        datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc),  # 30h gap (> 12h threshold)
-        datetime(2026, 6, 2, 18, 0, tzinfo=timezone.utc),  # 6h gap
+        datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        datetime(2026, 6, 1, 6, 0, tzinfo=UTC),   # 6h gap (normal)
+        datetime(2026, 6, 2, 12, 0, tzinfo=UTC),  # 30h gap (> 12h threshold)
+        datetime(2026, 6, 2, 18, 0, tzinfo=UTC),  # 6h gap
     ]
     vals = [28.0, 28.2, 28.5, 28.3]
     stats = compute_series_stats(vals, timestamps=times, max_gap_hours=12.0)
@@ -251,8 +250,8 @@ def test_anomaly_detection_normal_baseline():
 # -----------------------------------------------------------------------------
 
 def test_filter_and_clean_observations():
-    t1 = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
-    t2 = datetime(2026, 6, 1, 6, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 6, 1, 6, 0, tzinfo=UTC)
 
     raw_vals = [
         28.0,
@@ -329,7 +328,7 @@ async def test_open_meteo_client_invalid_coordinates():
     client = OpenMeteoMarineClient()
     obs, evs, limits = await client.fetch_marine_data(latitude=120.0, longitude=50.0)
     assert len(obs) == 0
-    assert any("Invalid coordinate bounds" in l for l in limits)
+    assert any("Invalid coordinate bounds" in lim for lim in limits)
 
 @pytest.mark.asyncio
 async def test_open_meteo_client_fallback_to_fixture():

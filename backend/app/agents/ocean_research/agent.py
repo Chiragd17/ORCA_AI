@@ -1,30 +1,31 @@
 import uuid
-import math
-from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Tuple
+from datetime import UTC, datetime
 
-from app.agents.base import BaseAgent, InvestigationTask, AgentResult, AgentStatus
-from app.schemas.evidence import Finding, EvidenceRecord, FindingCategory, VerificationStatus
-from app.providers.data.open_meteo import OpenMeteoMarineClient
-from app.providers.data.historical_marine import HistoricalMarineDataLoader
-from app.providers.llm.base import BaseLLMProvider
-from app.core.config import settings
-from app.db.repositories.marine import MarineRepository
+from app.agents.base import AgentResult, AgentStatus, BaseAgent, InvestigationTask
 from app.agents.ocean_research.calculations import (
-    compute_series_stats,
-    compute_seasonal_breakdown,
-    compare_time_periods,
     compare_locations,
+    compare_time_periods,
+    compute_seasonal_breakdown,
+    compute_series_stats,
     detect_anomalies,
-    validate_geographic_coordinates,
-    validate_unit_compatibility,
     filter_and_clean_observations,
+    validate_geographic_coordinates,
 )
 from app.agents.ocean_research.queries import (
     MarineResearchQueryService,
-    SUPPORTED_MARINE_VARIABLES,
-    VARIABLE_UNITS,
 )
+from app.core.config import settings
+from app.db.repositories.marine import MarineRepository
+from app.providers.data.historical_marine import HistoricalMarineDataLoader
+from app.providers.data.open_meteo import OpenMeteoMarineClient
+from app.providers.llm.base import BaseLLMProvider
+from app.schemas.evidence import (
+    EvidenceRecord,
+    Finding,
+    FindingCategory,
+    VerificationStatus,
+)
+
 
 class OceanResearchAgent(BaseAgent):
     """
@@ -39,10 +40,10 @@ class OceanResearchAgent(BaseAgent):
 
     def __init__(
         self,
-        live_client: Optional[OpenMeteoMarineClient] = None,
-        historical_loader: Optional[HistoricalMarineDataLoader] = None,
-        marine_repository: Optional[MarineRepository] = None,
-        llm_provider: Optional[BaseLLMProvider] = None,
+        live_client: OpenMeteoMarineClient | None = None,
+        historical_loader: HistoricalMarineDataLoader | None = None,
+        marine_repository: MarineRepository | None = None,
+        llm_provider: BaseLLMProvider | None = None,
     ):
         self.live_client = live_client or OpenMeteoMarineClient()
         self.historical_loader = historical_loader or HistoricalMarineDataLoader()
@@ -68,10 +69,10 @@ class OceanResearchAgent(BaseAgent):
         self.query_service.repository = repository
 
     async def run(self, task: InvestigationTask) -> AgentResult:
-        findings: List[Finding] = []
-        evidence_records: List[EvidenceRecord] = []
-        limitations: List[str] = []
-        errors: List[str] = []
+        findings: list[Finding] = []
+        evidence_records: list[EvidenceRecord] = []
+        limitations: list[str] = []
+        errors: list[str] = []
 
         # Resolve effective query service (supporting repository or session injected via task context)
         effective_query_service = self.query_service
@@ -376,7 +377,7 @@ class OceanResearchAgent(BaseAgent):
                                 findings.append(
                                     Finding(
                                         id=f"fnd-anom-none-{uuid.uuid4().hex[:8]}",
-                                        claim=f"No thermal anomalies detected beyond 2.0-sigma threshold relative to the regional scientific baseline.",
+                                        claim="No thermal anomalies detected beyond 2.0-sigma threshold relative to the regional scientific baseline.",
                                         value=0,
                                         unit="occurrences",
                                         category=FindingCategory.DETERMINISTIC_CALCULATION,
@@ -391,7 +392,7 @@ class OceanResearchAgent(BaseAgent):
                         limitations.append("Insufficient historical baseline depth (<10 samples) for statistical anomaly detection.")
 
             except Exception as e:
-                errors.append(f"Historical dataset processing error: {str(e)}")
+                errors.append(f"Historical dataset processing error: {e!s}")
 
         # 4. Live Marine Observations Retrieval
         live_obs, live_ev, live_limits = await self.live_client.fetch_marine_data(lat, lon)
@@ -421,12 +422,12 @@ class OceanResearchAgent(BaseAgent):
                         "wind_direction_degrees": p.wind_direction_degrees,
                         "chlorophyll_mg_m3": p.chlorophyll_mg_m3,
                         "metadata_json": {
-                            "ingested_at": datetime.now(timezone.utc).isoformat(),
+                            "ingested_at": datetime.now(UTC).isoformat(),
                         },
                     })
                 await effective_query_service.repository.bulk_ingest(db_recs)
             except Exception as e:
-                limitations.append(f"Persistence of live marine observations to PostgreSQL skipped ({str(e)}).")
+                limitations.append(f"Persistence of live marine observations to PostgreSQL skipped ({e!s}).")
 
         if live_obs:
             primary_live_ev_id = live_ev[0].id if live_ev else "ev-live-none"
@@ -475,7 +476,7 @@ class OceanResearchAgent(BaseAgent):
         if self.llm_provider and findings:
             try:
                 summary_prompt = (
-                    f"Summarize these oceanographic findings objectively without inventing any data: "
+                    "Summarize these oceanographic findings objectively without inventing any data: "
                     + "; ".join(f.claim for f in findings[:4])
                 )
                 ai_text = await self.llm_provider.generate_text(
@@ -497,7 +498,7 @@ class OceanResearchAgent(BaseAgent):
                         )
                     )
             except Exception as e:
-                limitations.append(f"Optional LLM scientific synthesis unavailable ({str(e)}). Deterministic results preserved.")
+                limitations.append(f"Optional LLM scientific synthesis unavailable ({e!s}). Deterministic results preserved.")
 
         # 6. Determine Agent Status
         prompt_requested_unsupported = any(

@@ -1,13 +1,14 @@
 import json
-import pytest
-from unittest.mock import patch, AsyncMock
-import httpx
+from unittest.mock import AsyncMock, patch
 
-from app.providers.data.open_meteo import OpenMeteoMarineClient
+import httpx
+import pytest
+
+from app.agents.base import AgentStatus, InvestigationTask
 from app.agents.ocean_research.agent import OceanResearchAgent
-from app.agents.base import InvestigationTask, AgentStatus
-from app.schemas.investigations import WorkspaceType
+from app.providers.data.open_meteo import OpenMeteoMarineClient
 from app.schemas.evidence import FindingCategory
+from app.schemas.investigations import WorkspaceType
 
 # -----------------------------------------------------------------------------
 # 1. Open-Meteo Provider HTTP Error and Exception Handling

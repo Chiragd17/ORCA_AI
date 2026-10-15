@@ -193,7 +193,7 @@ POSTGRES_PORT=5432
 
 # Optional Groq LLM Inference (Auto-detected if key is provided)
 GROQ_API_KEY=gsk_...
-GROQ_MODEL=openai/gpt-oss-120b
+GROQ_MODEL=llama-3.3-70b-versatile
 ```
 > [!IMPORTANT]
 > Never commit `.env` or API credentials to version control. The repository `.gitignore` explicitly blocks all `.env` files.

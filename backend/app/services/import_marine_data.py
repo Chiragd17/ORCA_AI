@@ -1,15 +1,14 @@
 import asyncio
 import sys
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Any
 
 from app.core.logging import logger
-from app.db.session import AsyncSessionLocal
 from app.db.repositories.marine import MarineRepository
+from app.db.session import AsyncSessionLocal
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
 
 
-async def import_historical_marine_data(dataset_path: Optional[str] = None) -> Dict[str, Any]:
+async def import_historical_marine_data(dataset_path: str | None = None) -> dict[str, Any]:
     """
     Executes idempotent bulk ingestion of the validated historical marine scientific dataset
     into the shared PostgreSQL database via MarineRepository.

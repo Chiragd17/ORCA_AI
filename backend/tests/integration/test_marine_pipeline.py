@@ -1,13 +1,16 @@
+from datetime import UTC, datetime
+
 import pytest
-from datetime import datetime, timezone
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.agents.base import AgentStatus, InvestigationTask
+from app.agents.ocean_research.agent import OceanResearchAgent
 from app.db.base import Base
 from app.db.repositories.marine import MarineRepository
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
-from app.agents.ocean_research.agent import OceanResearchAgent
-from app.agents.base import InvestigationTask, AgentStatus
-from app.schemas.investigations import WorkspaceType
 from app.schemas.evidence import FindingCategory
+from app.schemas.investigations import WorkspaceType
+
 
 @pytest.fixture
 async def in_memory_db():
@@ -24,7 +27,7 @@ async def in_memory_db():
 @pytest.mark.asyncio
 async def test_marine_repository_idempotency(in_memory_db: AsyncSession):
     repo = MarineRepository(in_memory_db)
-    
+
     # 1. Ensure DataSource exists
     source = await repo.ensure_data_source(
         source_id="open_meteo",
@@ -34,7 +37,7 @@ async def test_marine_repository_idempotency(in_memory_db: AsyncSession):
     assert source.id == "open_meteo"
 
     # 2. Ingest initial record
-    t0 = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+    t0 = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
     records = [
         {
             "source_id": "open_meteo",
@@ -120,7 +123,7 @@ async def test_marine_repository_spatial_filtering(in_memory_db: AsyncSession):
     repo = MarineRepository(in_memory_db)
     await repo.ensure_data_source("test_src", "Test Source")
 
-    t = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+    t = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
     # Point A: Mangaluru (12.87, 74.88)
     # Point B: Mumbai (~18.92, 72.83) > 700km away
     records = [
@@ -187,7 +190,7 @@ async def test_marine_repository_record_versioning_update(in_memory_db: AsyncSes
     repo = MarineRepository(in_memory_db)
     await repo.ensure_data_source("test_calib_src", "Calibration Station")
 
-    t_obs = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    t_obs = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
     initial_rec = {
         "source_id": "test_calib_src",
         "observation_time": t_obs,
@@ -224,7 +227,7 @@ async def test_marine_repository_metadata_and_provenance_retention(in_memory_db:
     repo = MarineRepository(in_memory_db)
     await repo.ensure_data_source("prov_src", "Provenance Source")
 
-    t_obs = datetime(2026, 9, 15, 6, 0, tzinfo=timezone.utc)
+    t_obs = datetime(2026, 9, 15, 6, 0, tzinfo=UTC)
     rec = {
         "source_id": "prov_src",
         "observation_time": t_obs,
@@ -256,8 +259,9 @@ async def test_import_historical_marine_data_service(in_memory_db: AsyncSession)
     Verifies that the import_historical_marine_data service ingests the real processed
     scientific dataset into the repository with 100% success and zero validation failures.
     """
-    from unittest.mock import patch
     from contextlib import asynccontextmanager
+    from unittest.mock import patch
+
     from app.services.import_marine_data import import_historical_marine_data
 
     @asynccontextmanager

@@ -1,9 +1,9 @@
 import math
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any
 
 # Physical bound limits for marine variables (plausible physical range)
-PHYSICAL_BOUNDS: Dict[str, Tuple[float, float]] = {
+PHYSICAL_BOUNDS: dict[str, tuple[float, float]] = {
     "sea_surface_temperature_celsius": (-2.0, 45.0),
     "wave_height_meters": (0.0, 35.0),
     "wave_period_seconds": (0.5, 35.0),
@@ -14,7 +14,7 @@ PHYSICAL_BOUNDS: Dict[str, Tuple[float, float]] = {
 }
 
 # Unit compatibility clusters
-UNIT_COMPATIBILITY_CLUSTERS: List[set[str]] = [
+UNIT_COMPATIBILITY_CLUSTERS: list[set[str]] = [
     {"°c", "c", "celsius", "degc"},
     {"k", "kelvin"},
     {"m", "meter", "meters"},
@@ -26,7 +26,7 @@ UNIT_COMPATIBILITY_CLUSTERS: List[set[str]] = [
     {"mg/m3", "mg_m3", "mg/m^3"},
 ]
 
-def validate_unit_compatibility(unit_a: Optional[str], unit_b: Optional[str]) -> bool:
+def validate_unit_compatibility(unit_a: str | None, unit_b: str | None) -> bool:
     """
     Checks if two measurement units are compatible for scientific comparison.
     If either is None or empty, compatibility cannot be asserted.
@@ -42,7 +42,7 @@ def validate_unit_compatibility(unit_a: Optional[str], unit_b: Optional[str]) ->
             return True
     return False
 
-def validate_geographic_coordinates(latitude: Optional[float], longitude: Optional[float]) -> Tuple[bool, Optional[str]]:
+def validate_geographic_coordinates(latitude: float | None, longitude: float | None) -> tuple[bool, str | None]:
     """
     Validates latitude (-90 to 90) and longitude (-180 to 180).
     """
@@ -59,11 +59,11 @@ def validate_geographic_coordinates(latitude: Optional[float], longitude: Option
     return True, None
 
 def filter_and_clean_observations(
-    values: List[Any],
-    timestamps: Optional[List[datetime]] = None,
-    variable_name: Optional[str] = None,
+    values: list[Any],
+    timestamps: list[datetime] | None = None,
+    variable_name: str | None = None,
     deduplicate_timestamps: bool = True,
-) -> Tuple[List[float], List[datetime], List[str]]:
+) -> tuple[list[float], list[datetime], list[str]]:
     """
     Cleans an observation series:
     - Rejects non-numeric, None, and NaN values.
@@ -72,9 +72,9 @@ def filter_and_clean_observations(
     - Returns cleaned (values, timestamps, limitations/warnings).
     Missing observations are NEVER treated as zero.
     """
-    cleaned_vals: List[float] = []
-    cleaned_times: List[datetime] = []
-    issues: List[str] = []
+    cleaned_vals: list[float] = []
+    cleaned_times: list[datetime] = []
+    issues: list[str] = []
 
     bounds = PHYSICAL_BOUNDS.get(variable_name) if variable_name else None
     seen_timestamps = set()
@@ -118,10 +118,10 @@ def filter_and_clean_observations(
     return cleaned_vals, cleaned_times, issues
 
 def compute_series_stats(
-    values: List[float],
-    timestamps: Optional[List[datetime]] = None,
+    values: list[float],
+    timestamps: list[datetime] | None = None,
     max_gap_hours: float = 12.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Computes deterministic statistical metrics:
     - count
@@ -231,16 +231,16 @@ def get_indian_ocean_season(dt: datetime) -> str:
         return "Pre-Monsoon"
 
 def compute_seasonal_breakdown(
-    timestamps: List[datetime],
-    values: List[float],
+    timestamps: list[datetime],
+    values: list[float],
     min_observations_per_season: int = 1,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """
     Groups observations by Arabian Sea meteorological seasons.
     Only computes valid seasonal summaries when minimum observations threshold is met.
     Documents season definitions and sample adequacy explicitly.
     """
-    seasonal_buckets: Dict[str, List[tuple[datetime, float]]] = {
+    seasonal_buckets: dict[str, list[tuple[datetime, float]]] = {
         "Southwest Monsoon": [],
         "Post-Monsoon": [],
         "Winter": [],
@@ -282,16 +282,16 @@ def compute_seasonal_breakdown(
     return breakdown
 
 def compare_time_periods(
-    period_a_values: List[float],
-    period_b_values: List[float],
+    period_a_values: list[float],
+    period_b_values: list[float],
     variable_name: str,
     unit: str,
-    unit_b: Optional[str] = None,
+    unit_b: str | None = None,
     period_a_name: str = "Period A",
     period_b_name: str = "Period B",
-    period_a_times: Optional[List[datetime]] = None,
-    period_b_times: Optional[List[datetime]] = None,
-) -> Dict[str, Any]:
+    period_a_times: list[datetime] | None = None,
+    period_b_times: list[datetime] | None = None,
+) -> dict[str, Any]:
     """
     Compares two time intervals deterministically.
     Preserves period boundaries, sample counts, mean difference, median difference, and percentage change.
@@ -342,16 +342,16 @@ def compare_time_periods(
     }
 
 def compare_locations(
-    loc_a_values: List[float],
-    loc_b_values: List[float],
+    loc_a_values: list[float],
+    loc_b_values: list[float],
     loc_a_name: str,
     loc_b_name: str,
     variable_name: str,
     unit: str,
-    unit_b: Optional[str] = None,
-    loc_a_times: Optional[List[datetime]] = None,
-    loc_b_times: Optional[List[datetime]] = None,
-) -> Dict[str, Any]:
+    unit_b: str | None = None,
+    loc_a_times: list[datetime] | None = None,
+    loc_b_times: list[datetime] | None = None,
+) -> dict[str, Any]:
     """
     Compares oceanographic variables across two spatial locations deterministically.
     Preserves sample counts, means, medians, differences, and units.
@@ -395,13 +395,13 @@ def compare_locations(
     }
 
 def detect_anomalies(
-    values: List[float],
-    baseline_values: List[float],
+    values: list[float],
+    baseline_values: list[float],
     threshold_sigma: float = 2.0,
     min_baseline_samples: int = 10,
     variable_name: str = "variable",
     unit: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Detects potential oceanographic anomalies against a designated baseline.
     Requires minimum sample depth (min_baseline_samples >= 10) to prevent unwarranted anomaly claims.

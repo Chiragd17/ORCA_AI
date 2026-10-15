@@ -1,25 +1,25 @@
-import pytest
-import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.exc import OperationalError
 
+import pytest
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.agents.base import AgentResult, AgentStatus, InvestigationTask
+from app.agents.ocean_research.agent import OceanResearchAgent
 from app.db.base import Base
 from app.db.repositories.marine import MarineRepository
-from app.providers.data.historical_marine import HistoricalMarineDataLoader
-from app.agents.ocean_research.agent import OceanResearchAgent
-from app.agents.base import InvestigationTask, AgentResult, AgentStatus
-from app.schemas.investigations import (
-    WorkspaceType,
-    InvestigationCreateRequest,
-    InvestigationStatus,
-    EventType,
-)
-from app.schemas.evidence import FindingCategory, VerificationStatus
-from app.orchestrator.service import OrchestratorService
 from app.evidence.registry import EvidenceRegistry
 from app.evidence.verification import verify_findings
+from app.orchestrator.service import OrchestratorService
+from app.providers.data.historical_marine import HistoricalMarineDataLoader
+from app.schemas.evidence import FindingCategory
+from app.schemas.investigations import (
+    EventType,
+    InvestigationCreateRequest,
+    InvestigationStatus,
+    WorkspaceType,
+)
 
 
 @pytest.fixture
@@ -49,7 +49,7 @@ async def test_shared_task_invocation_and_result_schema():
         prompt="Karnataka offshore marine wave height and sea conditions",
         latitude=12.87,
         longitude=74.88,
-        target_time=datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc),
+        target_time=datetime(2026, 10, 15, 12, 0, tzinfo=UTC),
         context={"location_name": "Mangaluru Port Offshore"},
     )
 

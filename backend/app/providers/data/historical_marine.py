@@ -1,13 +1,14 @@
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any
+
 import httpx
 
 from app.core.logging import logger
-from app.schemas.marine import MarineObservationPoint
 from app.schemas.evidence import EvidenceRecord
+
 
 class HistoricalMarineDataLoader:
     """
@@ -15,7 +16,7 @@ class HistoricalMarineDataLoader:
     Parses, validates, and normalizes historical scientific oceanographic records
     (NOAA ERDDAP / Copernicus Marine / ERA5 reanalysis).
     """
-    def __init__(self, default_data_path: Optional[str] = None):
+    def __init__(self, default_data_path: str | None = None):
         if default_data_path:
             self.data_path = Path(default_data_path)
         else:
@@ -27,8 +28,8 @@ class HistoricalMarineDataLoader:
             )
 
     def load_local_dataset(
-        self, file_path: Optional[str] = None
-    ) -> Tuple[List[Dict[str, Any]], EvidenceRecord, Dict[str, int]]:
+        self, file_path: str | None = None
+    ) -> tuple[list[dict[str, Any]], EvidenceRecord, dict[str, int]]:
         """
         Loads and validates historical scientific observations from local processed JSON dataset.
         Enforces physical bounds:
@@ -40,7 +41,7 @@ class HistoricalMarineDataLoader:
         if not path.exists():
             raise FileNotFoundError(f"Historical dataset file not found at {path}")
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             raw_data = json.load(f)
 
         meta = raw_data.get("dataset_metadata", {})
@@ -52,8 +53,8 @@ class HistoricalMarineDataLoader:
             id=ev_id,
             source_name=source_name,
             source_uri=source_url,
-            observation_time=datetime(2025, 6, 1, tzinfo=timezone.utc),
-            retrieval_time=datetime.now(timezone.utc),
+            observation_time=datetime(2025, 6, 1, tzinfo=UTC),
+            retrieval_time=datetime.now(UTC),
             latitude=12.87,
             longitude=74.88,
             data_type="historical_oceanographic_series",
@@ -71,7 +72,7 @@ class HistoricalMarineDataLoader:
         )
 
         counts = {"processed": 0, "valid": 0, "rejected": 0}
-        validated_records: List[Dict[str, Any]] = []
+        validated_records: list[dict[str, Any]] = []
 
         for rec in raw_data.get("records", []):
             counts["processed"] += 1
@@ -166,11 +167,11 @@ class HistoricalMarineDataLoader:
         start_date: str,
         end_date: str,
         timeout: float = 12.0,
-    ) -> Tuple[List[Dict[str, Any]], Optional[EvidenceRecord], List[str]]:
+    ) -> tuple[list[dict[str, Any]], EvidenceRecord | None, list[str]]:
         """
         Queries Open-Meteo Historical Archive API for past marine/weather reanalysis.
         """
-        limitations: List[str] = []
+        limitations: list[str] = []
         archive_url = "https://archive-api.open-meteo.com/v1/archive"
         params = {
             "latitude": latitude,
@@ -198,7 +199,7 @@ class HistoricalMarineDataLoader:
                 source_name="Open-Meteo ERA5 Historical Archive",
                 source_uri=f"{archive_url}?latitude={latitude}&longitude={longitude}",
                 observation_time=datetime.fromisoformat(times[0].replace("Z", "+00:00")) if times else None,
-                retrieval_time=datetime.now(timezone.utc),
+                retrieval_time=datetime.now(UTC),
                 latitude=latitude,
                 longitude=longitude,
                 data_type="historical_reanalysis_series",
@@ -229,5 +230,5 @@ class HistoricalMarineDataLoader:
             return records, evidence, limitations
 
         except Exception as e:
-            limitations.append(f"Historical archive query failed ({str(e)}). Falling back to local scientific archive.")
+            limitations.append(f"Historical archive query failed ({e!s}). Falling back to local scientific archive.")
             return [], None, limitations

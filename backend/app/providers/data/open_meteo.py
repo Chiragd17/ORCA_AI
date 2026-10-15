@@ -1,14 +1,15 @@
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict, Any
+
 import httpx
 
 from app.core.config import settings
 from app.core.logging import logger
-from app.schemas.marine import MarineObservationPoint
 from app.schemas.evidence import EvidenceRecord
+from app.schemas.marine import MarineObservationPoint
+
 
 class OpenMeteoMarineClient:
     """
@@ -16,7 +17,7 @@ class OpenMeteoMarineClient:
     Provides real-time, short-term forecast, and recent historical marine observations:
     wave height, period, direction, currents, and sea temperature proxies.
     """
-    def __init__(self, base_url: Optional[str] = None, timeout_seconds: float = 12.0):
+    def __init__(self, base_url: str | None = None, timeout_seconds: float = 12.0):
         self.base_url = base_url or settings.OPEN_METEO_BASE_URL
         self.timeout = timeout_seconds
 
@@ -24,17 +25,17 @@ class OpenMeteoMarineClient:
         self,
         latitude: float,
         longitude: float,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-    ) -> Tuple[List[MarineObservationPoint], List[EvidenceRecord], List[str]]:
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> tuple[list[MarineObservationPoint], list[EvidenceRecord], list[str]]:
         """
         Retrieves marine observations for given coordinates.
         Returns:
             (observations, evidence_records, limitations)
         """
-        limitations: List[str] = []
-        evidence_records: List[EvidenceRecord] = []
-        observations: List[MarineObservationPoint] = []
+        limitations: list[str] = []
+        evidence_records: list[EvidenceRecord] = []
+        observations: list[MarineObservationPoint] = []
 
         # Validate coordinates
         if not (-90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0):
@@ -79,13 +80,17 @@ class OpenMeteoMarineClient:
                 source_name="Open-Meteo Marine API",
                 source_uri=query_url,
                 observation_time=datetime.fromisoformat(times[0].replace("Z", "+00:00")) if times else None,
-                retrieval_time=datetime.now(timezone.utc),
+                retrieval_time=datetime.now(UTC),
                 latitude=latitude,
                 longitude=longitude,
                 data_type="marine_wave_current_series",
                 value={"sample_count": len(times)},
                 unit="m, s, deg, m/s",
-                metadata={"status": "live_query", "params": params},
+                metadata={
+                    "status": "live_query",
+                    "params": params,
+                    "current_velocity_samples": len(current_velocities),
+                },
             )
             evidence_records.append(evidence)
 
@@ -107,20 +112,20 @@ class OpenMeteoMarineClient:
             limitations.append("Chlorophyll observations are unavailable through Open-Meteo Marine API.")
 
         except Exception as e:
-            logger.warning(f"Live Open-Meteo query failed ({str(e)}). Falling back to scientific archive fixture.")
-            limitations.append(f"Live provider query error: {str(e)}. Using labelled scientific baseline fixture.")
+            logger.warning(f"Live Open-Meteo query failed ({e!s}). Falling back to scientific archive fixture.")
+            limitations.append(f"Live provider query error: {e!s}. Using labelled scientific baseline fixture.")
             observations, evidence_records = self._load_scientific_fixture(latitude, longitude)
 
         return observations, evidence_records, limitations
 
     def _load_scientific_fixture(
         self, latitude: float, longitude: float
-    ) -> Tuple[List[MarineObservationPoint], List[EvidenceRecord]]:
+    ) -> tuple[list[MarineObservationPoint], list[EvidenceRecord]]:
         fixture_path = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "marine_sample.json"
         if not fixture_path.exists():
             return [], []
 
-        with open(fixture_path, "r", encoding="utf-8") as f:
+        with open(fixture_path, encoding="utf-8") as f:
             data = json.load(f)
 
         hourly = data.get("hourly", {})
@@ -138,7 +143,7 @@ class OpenMeteoMarineClient:
             source_name="Arabian Sea Scientific Baseline (Labelled Fixture)",
             source_uri=str(fixture_path),
             observation_time=datetime.fromisoformat(times[0].replace("Z", "+00:00")) if times else None,
-            retrieval_time=datetime.now(timezone.utc),
+            retrieval_time=datetime.now(UTC),
             latitude=latitude,
             longitude=longitude,
             data_type="marine_observation_baseline",
