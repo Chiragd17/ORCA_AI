@@ -178,3 +178,75 @@ async def test_ocean_research_agent_with_persisted_repository(in_memory_db: Asyn
     comp_findings = [f for f in result.findings if f.category == FindingCategory.DETERMINISTIC_CALCULATION]
     assert len(comp_findings) > 0
 
+@pytest.mark.asyncio
+async def test_marine_repository_record_versioning_update(in_memory_db: AsyncSession):
+    """
+    Verifies that re-publishing an observation with updated or calibrated measurements
+    updates the existing record in place without duplicating the logical entity.
+    """
+    repo = MarineRepository(in_memory_db)
+    await repo.ensure_data_source("test_calib_src", "Calibration Station")
+
+    t_obs = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    initial_rec = {
+        "source_id": "test_calib_src",
+        "observation_time": t_obs,
+        "latitude": 13.0,
+        "longitude": 74.5,
+        "wave_height_meters": 2.1,
+        "metadata_json": {"version": 1, "quality_flag": "preliminary"},
+    }
+    await repo.bulk_ingest([initial_rec])
+
+    # Calibrated revised publication for the exact same timestamp and location
+    revised_rec = {
+        "source_id": "test_calib_src",
+        "observation_time": t_obs,
+        "latitude": 13.0,
+        "longitude": 74.5,
+        "wave_height_meters": 2.35,  # Calibrated value
+        "metadata_json": {"version": 2, "quality_flag": "quality_controlled"},
+    }
+    await repo.bulk_ingest([revised_rec])
+
+    stored = await repo.query_observations(latitude=13.0, longitude=74.5, radius_km=5.0)
+    assert len(stored) == 1
+    assert stored[0].wave_height_meters == 2.35
+    assert stored[0].metadata_json["version"] == 2
+    assert stored[0].metadata_json["quality_flag"] == "quality_controlled"
+
+@pytest.mark.asyncio
+async def test_marine_repository_metadata_and_provenance_retention(in_memory_db: AsyncSession):
+    """
+    Verifies that complete source metadata, evidence IDs, and quality attributes
+    survive persistence and retrieval intact.
+    """
+    repo = MarineRepository(in_memory_db)
+    await repo.ensure_data_source("prov_src", "Provenance Source")
+
+    t_obs = datetime(2026, 9, 15, 6, 0, tzinfo=timezone.utc)
+    rec = {
+        "source_id": "prov_src",
+        "observation_time": t_obs,
+        "latitude": 12.87,
+        "longitude": 74.88,
+        "sea_surface_temperature_celsius": 28.7,
+        "wave_height_meters": 1.6,
+        "metadata_json": {
+            "evidence_id": "ev-provenance-test-01",
+            "sensor": "acoustic_doppler_current_profiler",
+            "qa_status": "passed_level_2",
+            "reanalysis_grid": "0.1deg",
+        },
+    }
+    await repo.bulk_ingest([rec])
+
+    retrieved = await repo.query_observations(latitude=12.87, longitude=74.88, radius_km=10.0)
+    assert len(retrieved) == 1
+    meta = retrieved[0].metadata_json
+    assert meta["evidence_id"] == "ev-provenance-test-01"
+    assert meta["sensor"] == "acoustic_doppler_current_profiler"
+    assert meta["qa_status"] == "passed_level_2"
+    assert meta["reanalysis_grid"] == "0.1deg"
+
+
