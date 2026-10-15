@@ -4,7 +4,7 @@ from pydantic import Field
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(".env", "../.env"),
+        env_file=("backend/.env", ".env", "../.env"),
         env_file_encoding="utf-8",
         extra="ignore"
     )
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # AI LLM Settings
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
 
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"

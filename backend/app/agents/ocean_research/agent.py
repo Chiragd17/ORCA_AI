@@ -8,6 +8,7 @@ from app.schemas.evidence import Finding, EvidenceRecord, FindingCategory, Verif
 from app.providers.data.open_meteo import OpenMeteoMarineClient
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
 from app.providers.llm.base import BaseLLMProvider
+from app.core.config import settings
 from app.db.repositories.marine import MarineRepository
 from app.agents.ocean_research.calculations import (
     compute_series_stats,
@@ -50,7 +51,16 @@ class OceanResearchAgent(BaseAgent):
             repository=self.marine_repository,
             historical_loader=self.historical_loader,
         )
-        self.llm_provider = llm_provider
+        if llm_provider is not None:
+            self.llm_provider = llm_provider
+        elif getattr(settings, "GROQ_API_KEY", None) and not settings.GROQ_API_KEY.startswith("your_"):
+            try:
+                from app.providers.llm.groq import GroqLLMProvider
+                self.llm_provider = GroqLLMProvider()
+            except Exception:
+                self.llm_provider = None
+        else:
+            self.llm_provider = None
 
     async def run(self, task: InvestigationTask) -> AgentResult:
         findings: List[Finding] = []
