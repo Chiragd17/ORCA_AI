@@ -22,10 +22,19 @@ from app.schemas.investigations import (
 )
 
 
+from sqlalchemy import event
+
 @pytest.fixture
 async def shared_db_session():
-    """Isolated async SQLite database session mimicking PostgreSQL SQLAlchemy operations."""
+    """Isolated async SQLite database session mimicking PostgreSQL SQLAlchemy operations with FK enforcement."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def enable_sqlite_fk(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -69,6 +78,7 @@ async def test_shared_task_invocation_and_result_schema():
         assert len(fnd.evidence_ids) > 0
         assert fnd.category in [
             FindingCategory.OBSERVATION,
+            FindingCategory.FORECAST,
             FindingCategory.HISTORICAL_RECORD,
             FindingCategory.DETERMINISTIC_CALCULATION,
             FindingCategory.AI_INTERPRETATION,
@@ -86,7 +96,7 @@ async def test_persisted_repository_evidence_reference_integrity(shared_db_sessi
     records, evidence, counts = loader.load_local_dataset()
 
     await repo.ensure_data_source(
-        source_id="persisted_copernicus_era5",
+        source_id="historical_archive",
         name=evidence.source_name,
         base_url=evidence.source_uri,
     )
@@ -170,7 +180,7 @@ async def test_live_provider_outage_historical_analysis_resilience(shared_db_ses
     repo = MarineRepository(shared_db_session)
     loader = HistoricalMarineDataLoader()
     records, evidence, _ = loader.load_local_dataset()
-    await repo.ensure_data_source("archive_src", evidence.source_name)
+    await repo.ensure_data_source("historical_archive", evidence.source_name)
     await repo.bulk_ingest(records)
 
     agent = OceanResearchAgent(marine_repository=repo)
@@ -236,7 +246,7 @@ async def test_orchestrator_integration_with_ocean_research(shared_db_session: A
     repo = MarineRepository(shared_db_session)
     loader = HistoricalMarineDataLoader()
     records, evidence, _ = loader.load_local_dataset()
-    await repo.ensure_data_source("copernicus_era5", evidence.source_name)
+    await repo.ensure_data_source("historical_archive", evidence.source_name)
     await repo.bulk_ingest(records)
 
     orchestrator = OrchestratorService()
@@ -336,7 +346,7 @@ async def test_repository_injection_via_task_context(shared_db_session: AsyncSes
     repo = MarineRepository(shared_db_session)
     loader = HistoricalMarineDataLoader()
     records, evidence, _ = loader.load_local_dataset()
-    await repo.ensure_data_source("ctx_src", evidence.source_name)
+    await repo.ensure_data_source("historical_archive", evidence.source_name)
     await repo.bulk_ingest(records)
 
     agent = OceanResearchAgent()  # Inited without repository

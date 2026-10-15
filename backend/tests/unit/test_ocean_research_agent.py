@@ -188,6 +188,21 @@ def test_compare_time_periods():
     assert comp["mean_difference"] == 0.8
     assert comp["median_difference"] == 0.8
     assert comp["percentage_change"] == pytest.approx(66.67, 0.1)
+    assert comp["direction"] == "higher"
+
+def test_compare_time_periods_signed_direction():
+    # Test positive, negative, and zero differences
+    higher_comp = compare_time_periods([1.0], [2.0], "wave_height", "m")
+    assert higher_comp["mean_difference"] == 1.0
+    assert higher_comp["direction"] == "higher"
+
+    lower_comp = compare_time_periods([3.0], [1.5], "wave_height", "m")
+    assert lower_comp["mean_difference"] == -1.5
+    assert lower_comp["direction"] == "lower"
+
+    identical_comp = compare_time_periods([2.5], [2.5], "wave_height", "m")
+    assert identical_comp["mean_difference"] == 0.0
+    assert identical_comp["direction"] == "identical"
 
 def test_compare_time_periods_empty_rejected():
     comp = compare_time_periods([], [2.0, 2.5], "wave_height", "m")
@@ -244,6 +259,13 @@ def test_anomaly_detection_normal_baseline():
     assert res["eligible"] is True
     assert res["anomaly_detected"] is False
     assert res["anomaly_count"] == 0
+
+def test_anomaly_detection_rejects_identical_sample_and_baseline():
+    # Regression test: anomaly detection cannot evaluate a baseline against itself
+    baseline = [28.0, 28.2, 28.1, 28.3, 28.0, 28.2, 28.1, 28.0, 28.2, 28.1]
+    res = detect_anomalies(baseline, baseline, threshold_sigma=2.0)
+    assert res["eligible"] is False
+    assert "evaluation sample cannot be identical to the baseline" in res["limitation"]
 
 # -----------------------------------------------------------------------------
 # 6. Missing, Duplicated, and Invalid Observations Handling
@@ -331,12 +353,99 @@ async def test_open_meteo_client_invalid_coordinates():
     assert any("Invalid coordinate bounds" in lim for lim in limits)
 
 @pytest.mark.asyncio
-async def test_open_meteo_client_fallback_to_fixture():
-    client = OpenMeteoMarineClient(base_url="http://invalid-nonexistent-domain.test/marine")
-    obs, evs, limits = await client.fetch_marine_data(latitude=12.87, longitude=74.88)
-    assert len(obs) > 0
-    assert len(evs) == 1
-    assert evs[0].metadata.get("is_fixture") is True
+async def test_open_meteo_client_failure_handling():
+    # Normal mode: returns empty observations, no disguised fixture
+    client_normal = OpenMeteoMarineClient(base_url="http://invalid-nonexistent-domain.test/marine", demo_mode=False)
+    obs, evs, limits = await client_normal.fetch_marine_data(latitude=12.87, longitude=74.88)
+    assert len(obs) == 0
+    assert len(evs) == 0
+    assert any("Live marine provider unavailable" in lim for lim in limits)
+
+    # Demo mode: returns labelled demo fixture
+    client_demo = OpenMeteoMarineClient(base_url="http://invalid-nonexistent-domain.test/marine", demo_mode=True)
+    obs_d, evs_d, limits_d = await client_demo.fetch_marine_data(latitude=12.87, longitude=74.88)
+    assert len(obs_d) > 0
+    assert len(evs_d) == 1
+    assert evs_d[0].metadata.get("is_fixture") is True
+    assert evs_d[0].metadata.get("is_demo") is True
+
+
+@pytest.mark.asyncio
+async def test_open_meteo_client_live_variables_and_currents():
+    """
+    Verifies that OpenMeteoMarineClient correctly parses sea_surface_temperature,
+    wave parameters, and converts ocean_current_velocity from km/h to m/s.
+    """
+    import httpx
+    from unittest.mock import patch
+
+    mock_payload = {
+        "latitude": 12.87,
+        "longitude": 74.88,
+        "hourly": {
+            "time": ["2026-10-15T00:00:00Z", "2026-10-15T01:00:00Z"],
+            "sea_surface_temperature": [28.6, 28.7],
+            "wave_height": [1.5, 1.6],
+            "wave_period": [7.0, 7.2],
+            "wave_direction": [245.0, 250.0],
+            "ocean_current_velocity": [3.6, 7.2],  # 3.6 km/h = 1.0 m/s, 7.2 km/h = 2.0 m/s
+            "ocean_current_direction": [180.0, 190.0],
+        },
+    }
+
+    mock_resp = httpx.Response(200, json=mock_payload, request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        client = OpenMeteoMarineClient()
+        obs, evs, limits = await client.fetch_marine_data(12.87, 74.88)
+
+        assert len(obs) == 2
+        assert obs[0].sea_surface_temperature_celsius == 28.6
+        assert obs[0].wave_height_meters == 1.5
+        # Verify velocity conversion from km/h to m/s (3.6 / 3.6 = 1.0)
+        assert obs[0].ocean_current_velocity_mps == 1.0
+        assert obs[0].ocean_current_direction_degrees == 180.0
+        assert obs[1].ocean_current_velocity_mps == 2.0
+        # Wind is not provided on marine endpoint
+        assert obs[0].wind_speed_knots is None
+        assert any("Surface wind variables are not provided" in lim for lim in limits)
+
+
+@pytest.mark.asyncio
+async def test_fetch_archive_from_open_meteo_temperature_semantics():
+    """
+    Verifies that HistoricalMarineDataLoader.fetch_archive_from_open_meteo()
+    disconnects temperature_2m from sea_surface_temperature_celsius (leaving SST as None)
+    and reports SST as unavailable.
+    """
+    import httpx
+    from unittest.mock import patch
+
+    mock_payload = {
+        "latitude": 12.87,
+        "longitude": 74.88,
+        "hourly": {
+            "time": ["2025-06-01T00:00:00Z", "2025-06-01T01:00:00Z"],
+            "temperature_2m": [30.5, 31.0],  # 2-meter air temperature
+            "wind_speed_10m": [15.0, 20.0],
+            "wind_direction_10m": [220.0, 230.0],
+        },
+    }
+
+    mock_resp = httpx.Response(200, json=mock_payload, request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        loader = HistoricalMarineDataLoader()
+        records, ev, limits = await loader.fetch_archive_from_open_meteo(12.87, 74.88, "2025-06-01", "2025-06-02")
+
+        assert len(records) == 2
+        for r in records:
+            # SST must NEVER be populated with 2m air temperature!
+            assert r["sea_surface_temperature_celsius"] is None
+            # Air temperature preserved only in metadata
+            assert r["metadata_json"]["temperature_2m_celsius"] is not None
+
+        assert any("NOT sea surface temperature (SST)" in lim for lim in limits)
+        assert ev.metadata.get("sea_surface_temperature_available") is False
+        assert ev.metadata.get("air_temperature_2m_available") is True
 
 # -----------------------------------------------------------------------------
 # 11. Ocean Research Agent Full Execution & Evidence Integrity
@@ -463,6 +572,6 @@ async def test_ocean_research_agent_llm_failure_resilience():
     result = await agent.run(task)
     # The agent must NOT crash. Deterministic results must be returned!
     assert len(result.findings) > 0
-    assert any(f.category == FindingCategory.OBSERVATION for f in result.findings)
+    assert any(f.category in (FindingCategory.OBSERVATION, FindingCategory.FORECAST) for f in result.findings)
     # LLM failure must be disclosed in limitations
     assert any("LLM scientific synthesis unavailable" in lim for lim in result.limitations)

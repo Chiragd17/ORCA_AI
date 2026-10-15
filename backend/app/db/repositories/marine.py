@@ -1,10 +1,9 @@
-from __future__ import annotations
-
+import math
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.marine import DataSource, MarineObservation
@@ -55,6 +54,8 @@ class MarineRepository:
         wave_height_meters: float | None = None,
         wave_period_seconds: float | None = None,
         wave_direction_degrees: float | None = None,
+        ocean_current_velocity_mps: float | None = None,
+        ocean_current_direction_degrees: float | None = None,
         wind_speed_knots: float | None = None,
         wind_direction_degrees: float | None = None,
         chlorophyll_mg_m3: float | None = None,
@@ -62,6 +63,7 @@ class MarineRepository:
     ) -> Tuple_Result:
         """
         Idempotent insert or update based on (source_id, observation_time, latitude, longitude).
+        Preserves existing valid fields when incoming data is partial.
         """
         # Ensure UTC timezone
         if observation_time.tzinfo is None:
@@ -79,15 +81,29 @@ class MarineRepository:
         existing = res.scalar_one_or_none()
 
         if existing:
-            # Update fields if changed
-            existing.sea_surface_temperature_celsius = sea_surface_temperature_celsius
-            existing.wave_height_meters = wave_height_meters
-            existing.wave_period_seconds = wave_period_seconds
-            existing.wave_direction_degrees = wave_direction_degrees
-            existing.wind_speed_knots = wind_speed_knots
-            existing.wind_direction_degrees = wind_direction_degrees
-            existing.chlorophyll_mg_m3 = chlorophyll_mg_m3
-            existing.metadata_json = metadata_json or {}
+            # Preservation of existing non-null fields when incoming values are None (partial updates)
+            if sea_surface_temperature_celsius is not None:
+                existing.sea_surface_temperature_celsius = sea_surface_temperature_celsius
+            if wave_height_meters is not None:
+                existing.wave_height_meters = wave_height_meters
+            if wave_period_seconds is not None:
+                existing.wave_period_seconds = wave_period_seconds
+            if wave_direction_degrees is not None:
+                existing.wave_direction_degrees = wave_direction_degrees
+            if ocean_current_velocity_mps is not None:
+                existing.ocean_current_velocity_mps = ocean_current_velocity_mps
+            if ocean_current_direction_degrees is not None:
+                existing.ocean_current_direction_degrees = ocean_current_direction_degrees
+            if wind_speed_knots is not None:
+                existing.wind_speed_knots = wind_speed_knots
+            if wind_direction_degrees is not None:
+                existing.wind_direction_degrees = wind_direction_degrees
+            if chlorophyll_mg_m3 is not None:
+                existing.chlorophyll_mg_m3 = chlorophyll_mg_m3
+            if metadata_json:
+                merged_meta = dict(existing.metadata_json or {})
+                merged_meta.update(metadata_json)
+                existing.metadata_json = merged_meta
             return "updated", existing
         else:
             obs = MarineObservation(
@@ -100,6 +116,8 @@ class MarineRepository:
                 wave_height_meters=wave_height_meters,
                 wave_period_seconds=wave_period_seconds,
                 wave_direction_degrees=wave_direction_degrees,
+                ocean_current_velocity_mps=ocean_current_velocity_mps,
+                ocean_current_direction_degrees=ocean_current_direction_degrees,
                 wind_speed_knots=wind_speed_knots,
                 wind_direction_degrees=wind_direction_degrees,
                 chlorophyll_mg_m3=chlorophyll_mg_m3,
@@ -113,7 +131,8 @@ class MarineRepository:
         counts = {"processed": len(records), "inserted": 0, "updated": 0, "failed": 0}
         for r in records:
             try:
-                action, _ = await self.upsert_observation(**r)
+                async with self.session.begin_nested():
+                    action, _ = await self.upsert_observation(**r)
                 if action == "inserted":
                     counts["inserted"] += 1
                 else:
@@ -132,17 +151,49 @@ class MarineRepository:
         end_time: datetime | None = None,
     ) -> list[MarineObservation]:
         """
-        Retrieves marine observations filtered by time and approximate bounding box,
+        Retrieves marine observations filtered by time and spherical bounding box
+        accounting for latitude convergence and longitude wrapping,
         then refined by deterministic great-circle Haversine distance.
         """
-        # 1 deg latitude is approx 111km
+        # 1 deg latitude is approx 111.0 km
         lat_delta = radius_km / 111.0
-        lon_delta = radius_km / (111.0 * max(0.1, abs(abs(latitude) - 90.0) / 90.0))
+        min_lat = max(-90.0, latitude - lat_delta)
+        max_lat = min(90.0, latitude + lat_delta)
+
+        # Longitude bounding with convergence at high latitudes
+        cos_lat = math.cos(math.radians(latitude))
+        if abs(latitude) >= 89.0 or cos_lat < 0.001:
+            lon_delta = 180.0
+        else:
+            lon_delta = min(180.0, radius_km / (111.32 * cos_lat))
 
         conditions = [
-            MarineObservation.latitude.between(latitude - lat_delta, latitude + lat_delta),
-            MarineObservation.longitude.between(longitude - lon_delta, longitude + lon_delta),
+            MarineObservation.latitude.between(min_lat, max_lat),
         ]
+
+        # Handle longitude wrapping across [-180.0, 180.0]
+        if lon_delta < 180.0:
+            raw_min_lon = longitude - lon_delta
+            raw_max_lon = longitude + lon_delta
+            if raw_min_lon < -180.0:
+                wrapped_min = raw_min_lon + 360.0
+                conditions.append(
+                    or_(
+                        MarineObservation.longitude >= wrapped_min,
+                        MarineObservation.longitude <= raw_max_lon,
+                    )
+                )
+            elif raw_max_lon > 180.0:
+                wrapped_max = raw_max_lon - 360.0
+                conditions.append(
+                    or_(
+                        MarineObservation.longitude >= raw_min_lon,
+                        MarineObservation.longitude <= wrapped_max,
+                    )
+                )
+            else:
+                conditions.append(MarineObservation.longitude.between(raw_min_lon, raw_max_lon))
+
         if start_time:
             conditions.append(MarineObservation.observation_time >= start_time)
         if end_time:
@@ -158,3 +209,4 @@ class MarineRepository:
             if haversine_distance_km(latitude, longitude, obs.latitude, obs.longitude) <= radius_km
         ]
         return refined
+

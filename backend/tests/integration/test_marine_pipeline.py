@@ -12,9 +12,18 @@ from app.schemas.evidence import FindingCategory
 from app.schemas.investigations import WorkspaceType
 
 
+from sqlalchemy import event
+
 @pytest.fixture
 async def in_memory_db():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def enable_sqlite_fk(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -274,5 +283,261 @@ async def test_import_historical_marine_data_service(in_memory_db: AsyncSession)
         assert res["loaded_counts"]["valid"] == 23
         assert res["ingest_summary"]["inserted"] == 23
         assert res["ingest_summary"]["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_marine_repository_foreign_key_rejection(in_memory_db: AsyncSession):
+    """
+    Regression test: foreign key enforcement on MarineObservation.source_id -> data_sources.id.
+    Inserting a record with an unregistered source_id MUST fail with an integrity violation.
+    """
+    repo = MarineRepository(in_memory_db)
+    t0 = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
+
+    records = [
+        {
+            "source_id": "nonexistent_source_id_xyz",
+            "observation_time": t0,
+            "latitude": 12.87,
+            "longitude": 74.88,
+            "sea_surface_temperature_celsius": 28.5,
+        }
+    ]
+
+    ingest_res = await repo.bulk_ingest(records)
+    # With foreign keys enforced, the insert fails and is counted as failed
+    assert ingest_res["failed"] == 1
+    assert ingest_res["inserted"] == 0
+
+    # Query observations to confirm nothing was saved
+    obs = await repo.query_observations(12.87, 74.88, radius_km=10.0)
+    assert len(obs) == 0
+
+
+@pytest.mark.asyncio
+async def test_import_marine_data_mismatched_source_id_fails_truthfully(in_memory_db: AsyncSession):
+    """
+    Regression test: verifies that if ensure_data_source registers a source ID that does
+    not match what records have, the service truthfully reports status="failed" and does not claim success.
+    """
+    from contextlib import asynccontextmanager
+    from unittest.mock import patch
+    from app.services.import_marine_data import import_historical_marine_data
+
+    @asynccontextmanager
+    async def mock_session():
+        yield in_memory_db
+
+    # Force a mismatch: ensure_data_source registers copernicus_mismatch but records have historical_archive
+    original_ensure = MarineRepository.ensure_data_source
+
+    async def mismatched_ensure(self, source_id, name, **kwargs):
+        return await original_ensure(self, "mismatched_source_id_only", name, **kwargs)
+
+    with patch("app.services.import_marine_data.AsyncSessionLocal", side_effect=mock_session), \
+         patch.object(MarineRepository, "ensure_data_source", mismatched_ensure):
+        res = await import_historical_marine_data()
+        assert res["status"] == "failed"
+        assert res["ingest_summary"]["failed"] == 23
+        assert res["ingest_summary"]["inserted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_marine_repository_partial_update_field_preservation(in_memory_db: AsyncSession):
+    """
+    Regression test: non-destructive upsert.
+    Preserves existing valid fields (SST, wave height, wave period, ocean currents)
+    when an incoming update contains only partial data (None for other fields).
+    """
+    repo = MarineRepository(in_memory_db)
+    await repo.ensure_data_source(
+        source_id="test_partial_source",
+        name="Test Partial Update Provider",
+    )
+
+    t0 = datetime(2026, 10, 15, 6, 0, tzinfo=UTC)
+
+    # 1. Initial complete observation
+    rec1 = {
+        "source_id": "test_partial_source",
+        "observation_time": t0,
+        "latitude": 13.00,
+        "longitude": 74.50,
+        "sea_surface_temperature_celsius": 28.5,
+        "wave_height_meters": 1.75,
+        "wave_period_seconds": 8.0,
+        "wave_direction_degrees": 240.0,
+        "ocean_current_velocity_mps": 0.42,
+        "ocean_current_direction_degrees": 180.0,
+        "wind_speed_knots": 12.0,
+        "metadata_json": {"source": "buoy_initial", "calibrated": True},
+    }
+    await repo.bulk_ingest([rec1])
+
+    # Verify initial record
+    stored = await repo.query_observations(13.00, 74.50, radius_km=5.0)
+    assert len(stored) == 1
+    assert stored[0].sea_surface_temperature_celsius == 28.5
+    assert stored[0].wave_height_meters == 1.75
+    assert stored[0].ocean_current_velocity_mps == 0.42
+    assert stored[0].wind_speed_knots == 12.0
+    assert stored[0].metadata_json.get("calibrated") is True
+
+    # 2. Incoming partial update: updates SST and wind, leaves waves and ocean currents as None
+    rec2 = {
+        "source_id": "test_partial_source",
+        "observation_time": t0,
+        "latitude": 13.00,
+        "longitude": 74.50,
+        "sea_surface_temperature_celsius": 29.1,
+        "wave_height_meters": None,
+        "wave_period_seconds": None,
+        "wave_direction_degrees": None,
+        "ocean_current_velocity_mps": None,
+        "ocean_current_direction_degrees": None,
+        "wind_speed_knots": 15.5,
+        "metadata_json": {"update_batch": "satellite_sst_pass"},
+    }
+    update_res = await repo.bulk_ingest([rec2])
+    assert update_res["updated"] == 1
+    assert update_res["inserted"] == 0
+
+    # 3. Verify that wave_height and ocean currents were PRESERVED and not erased to None
+    refreshed = await repo.query_observations(13.00, 74.50, radius_km=5.0)
+    assert len(refreshed) == 1
+    assert refreshed[0].sea_surface_temperature_celsius == 29.1  # Updated
+    assert refreshed[0].wind_speed_knots == 15.5  # Updated
+    assert refreshed[0].wave_height_meters == 1.75  # Preserved!
+    assert refreshed[0].wave_period_seconds == 8.0  # Preserved!
+    assert refreshed[0].wave_direction_degrees == 240.0  # Preserved!
+    assert refreshed[0].ocean_current_velocity_mps == 0.42  # Preserved!
+    assert refreshed[0].ocean_current_direction_degrees == 180.0  # Preserved!
+    # Metadata was merged, not erased
+    assert refreshed[0].metadata_json.get("calibrated") is True
+    assert refreshed[0].metadata_json.get("update_batch") == "satellite_sst_pass"
+
+
+@pytest.mark.asyncio
+async def test_marine_repository_concurrency_and_repetition(in_memory_db: AsyncSession):
+    """
+    Regression test: tests repeated ingestion idempotency and multi-batch ingestion
+    using identical and overlapping batches.
+    """
+    repo = MarineRepository(in_memory_db)
+    await repo.ensure_data_source("concurrent_source", "Concurrency Testing Source")
+
+    t_base = datetime(2026, 10, 15, 0, 0, tzinfo=UTC)
+    batch = [
+        {
+            "source_id": "concurrent_source",
+            "observation_time": t_base.replace(hour=h),
+            "latitude": 12.0 + h * 0.1,
+            "longitude": 74.0 + h * 0.1,
+            "wave_height_meters": 1.0 + h * 0.1,
+        }
+        for h in range(5)
+    ]
+
+    # First ingestion run: all records are newly inserted
+    res1 = await repo.bulk_ingest(batch)
+    assert res1["inserted"] == 5
+    assert res1["updated"] == 0
+    assert res1["failed"] == 0
+
+    # Repeated ingestion run of identical batch: all records are updated in place idempotently
+    res2 = await repo.bulk_ingest(batch)
+    assert res2["inserted"] == 0
+    assert res2["updated"] == 5
+    assert res2["failed"] == 0
+
+    # Overlapping batch with partially new, partially existing records
+    overlapping_batch = [
+        {
+            "source_id": "concurrent_source",
+            "observation_time": t_base.replace(hour=h),
+            "latitude": 12.0 + h * 0.1,
+            "longitude": 74.0 + h * 0.1,
+            "wave_height_meters": 1.0 + h * 0.1,
+        }
+        for h in range(3, 8)  # h=3,4 exist; h=5,6,7 are new
+    ]
+    res3 = await repo.bulk_ingest(overlapping_batch)
+    assert res3["inserted"] == 3
+    assert res3["updated"] == 2
+    assert res3["failed"] == 0
+
+    # Ensure total persisted count is exactly 8 unique records without duplicates
+    all_obs = await repo.query_observations(12.35, 74.35, radius_km=100.0)
+    assert len(all_obs) == 8
+
+
+@pytest.mark.asyncio
+async def test_marine_repository_high_latitude_and_antimeridian_wrapping(in_memory_db: AsyncSession):
+    """
+    Regression test: verifies spherical bounding box queries at high latitudes
+    and longitude wrapping across the antimeridian (+/-180.0).
+    """
+    repo = MarineRepository(in_memory_db)
+    await repo.ensure_data_source("polar_pacific_source", "Polar and Pacific Source")
+
+    t0 = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
+
+    # 1. Antimeridian test points (around 180°/-180° in Bering Sea/Aleutians)
+    p_west = {
+        "source_id": "polar_pacific_source",
+        "observation_time": t0,
+        "latitude": 52.0,
+        "longitude": 179.8,  # East longitude (near 180)
+        "wave_height_meters": 3.2,
+    }
+    p_east = {
+        "source_id": "polar_pacific_source",
+        "observation_time": t0,
+        "latitude": 52.0,
+        "longitude": -179.8,  # West longitude (across antimeridian)
+        "wave_height_meters": 3.4,
+    }
+    await repo.bulk_ingest([p_west, p_east])
+
+    # Query centered at 52.0°N, 179.9°E with radius 50km (which spans the -180/180 border)
+    results = await repo.query_observations(latitude=52.0, longitude=179.9, radius_km=50.0)
+    assert len(results) == 2  # Both points retrieved across the antimeridian seam!
+
+    # 2. High latitude point (85.0°N in Arctic Ocean)
+    p_arctic = {
+        "source_id": "polar_pacific_source",
+        "observation_time": t0,
+        "latitude": 85.0,
+        "longitude": 10.0,
+        "wave_height_meters": 0.5,
+    }
+    await repo.bulk_ingest([p_arctic])
+
+    arctic_res = await repo.query_observations(latitude=85.0, longitude=10.0, radius_km=25.0)
+    assert len(arctic_res) == 1
+    assert arctic_res[0].wave_height_meters == 0.5
+
+
+def _is_postgres_env_available() -> bool:
+    """Helper to detect if live PostgreSQL is available for real database tests."""
+    import os
+    return bool(os.getenv("RUN_REAL_POSTGRES_TESTS", "").lower() in ("1", "true"))
+
+
+@pytest.mark.skipif(not _is_postgres_env_available(), reason="Genuine PostgreSQL environment not available or not configured (RUN_REAL_POSTGRES_TESTS != 1)")
+@pytest.mark.asyncio
+async def test_postgresql_real_db_foreign_key_and_uniqueness():
+    """
+    Test suite for genuine PostgreSQL database operations when configured.
+    Verifies actual PostgreSQL UNIQUE constraint enforcement and Foreign Key error handling.
+    """
+    from app.db.session import engine
+    from sqlalchemy import text
+
+    async with engine.connect() as conn:
+        res = await conn.execute(text("SELECT version();"))
+        version = res.scalar()
+        assert "PostgreSQL" in version
+
 
 

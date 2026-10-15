@@ -15,3 +15,8 @@ async def test_get_marine_observations_api():
     assert len(data["observations"]) > 0
     assert len(data["evidence"]) > 0
     assert "limitations" in data
+    obs_sample = data["observations"][0]
+    assert "ocean_current_velocity_mps" in obs_sample
+    assert "ocean_current_direction_degrees" in obs_sample
+    assert "sea_surface_temperature_celsius" in obs_sample
+    assert "wave_height_meters" in obs_sample

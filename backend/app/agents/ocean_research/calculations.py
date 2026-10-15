@@ -323,6 +323,13 @@ def compare_time_periods(
     med_b = stats_b["median"]
     med_diff = round(med_b - med_a, 2) if med_a is not None and med_b is not None else None
 
+    if mean_diff > 0:
+        direction = "higher"
+    elif mean_diff < 0:
+        direction = "lower"
+    else:
+        direction = "identical"
+
     return {
         "valid_comparison": True,
         "variable": variable_name,
@@ -338,6 +345,7 @@ def compare_time_periods(
         "mean_difference": mean_diff,
         "median_difference": med_diff,
         "percentage_change": pct_change,
+        "direction": direction,
         "method": "Deterministic two-interval comparison of mean and median metrics.",
     }
 
@@ -405,7 +413,25 @@ def detect_anomalies(
     """
     Detects potential oceanographic anomalies against a designated baseline.
     Requires minimum sample depth (min_baseline_samples >= 10) to prevent unwarranted anomaly claims.
+    Requires evaluation sample and baseline to be separate datasets.
     """
+    if not values:
+        return {
+            "has_anomaly": False,
+            "anomaly_detected": False,
+            "eligible": False,
+            "limitation": "Insufficient assessment samples (0 provided) for anomaly detection.",
+        }
+
+    # Anomaly detection cannot evaluate the baseline against itself
+    if values is baseline_values or (len(values) == len(baseline_values) and values == baseline_values):
+        return {
+            "has_anomaly": False,
+            "anomaly_detected": False,
+            "eligible": False,
+            "limitation": "Anomaly detection requires separate baseline and assessment periods; evaluation sample cannot be identical to the baseline.",
+        }
+
     baseline_stats = compute_series_stats(baseline_values)
     if baseline_stats["count"] < min_baseline_samples:
         return {

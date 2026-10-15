@@ -24,12 +24,13 @@ async def import_historical_marine_data(dataset_path: str | None = None) -> dict
     try:
         async with AsyncSessionLocal() as session:
             repo = MarineRepository(session)
-            # Ensure data source registration
+            # Ensure canonical data source registration matching record source_id
+            canonical_source_id = "historical_archive"
             await repo.ensure_data_source(
-                source_id="copernicus_marine_era5",
+                source_id=canonical_source_id,
                 name=evidence.source_name,
                 base_url=evidence.source_uri,
-                description="Curated seasonal reference sample fixture for regional baseline testing (SST, waves, wind)",
+                description="Curated seasonal reference sample archive for regional marine baseline testing",
                 license_info=evidence.metadata.get("license"),
             )
             # Execute idempotent bulk upsert
@@ -41,11 +42,13 @@ async def import_historical_marine_data(dataset_path: str | None = None) -> dict
                 f"{ingest_summary['updated']} updated/deduplicated, "
                 f"{ingest_summary['failed']} failed."
             )
+
+            status = "failed" if ingest_summary["failed"] > 0 else "success"
             return {
                 "dataset_path": str(loader.data_path),
                 "loaded_counts": counts,
                 "ingest_summary": ingest_summary,
-                "status": "success",
+                "status": status,
             }
     except Exception as e:
         logger.error(f"Database ingestion failed: {e}")

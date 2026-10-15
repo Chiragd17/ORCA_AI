@@ -180,12 +180,19 @@ class OceanResearchAgent(BaseAgent):
                                 },
                             )
                         )
-                        diff_sign = "warmer" if loc_comp["mean_difference"] > 0 else "cooler"
+                        mean_diff = loc_comp["mean_difference"]
+                        if mean_diff > 0:
+                            diff_desc = f"{mean_diff} °C warmer"
+                        elif mean_diff < 0:
+                            diff_desc = f"{abs(mean_diff)} °C cooler"
+                        else:
+                            diff_desc = "identical in temperature (0.0 °C difference)"
+
                         findings.append(
                             Finding(
                                 id=f"fnd-comp-loc-{uuid.uuid4().hex[:8]}",
                                 claim=(
-                                    f"{loc_b_name} is on average {abs(loc_comp['mean_difference'])} °C {diff_sign} "
+                                    f"{loc_b_name} is on average {diff_desc} "
                                     f"than {loc_a_name} (mean: {loc_comp['location_b']['stats']['mean']} °C vs "
                                     f"{loc_comp['location_a']['stats']['mean']} °C)."
                                 ),
@@ -201,6 +208,14 @@ class OceanResearchAgent(BaseAgent):
                     limitations.append(
                         f"Insufficient spatial observations to compare {loc_a_name} with {loc_b_name}."
                     )
+
+        # Dynamic location label avoiding hardcoded regions where unjustified
+        if task.context.get("location_name"):
+            loc_label = task.context["location_name"]
+        elif 11.5 <= lat <= 15.5 and 73.0 <= lon <= 75.5:
+            loc_label = "Karnataka Coast"
+        else:
+            loc_label = f"coordinates ({lat:.2f}°N, {lon:.2f}°E)"
 
         # 3. Historical Scientific Data Processing
         is_historical_inquiry = any(
@@ -235,7 +250,7 @@ class OceanResearchAgent(BaseAgent):
                         metadata={
                             "record_count": len(target_hist),
                             "storage": "postgresql_shared_repository",
-                            "station_coverage": "Arabian Sea (Karnataka Offshore)",
+                            "station_coverage": f"Area centered on ({lat:.2f}°N, {lon:.2f}°E) radius 100km",
                         },
                     )
                     evidence_records.append(db_evidence)
@@ -281,7 +296,7 @@ class OceanResearchAgent(BaseAgent):
                             Finding(
                                 id=f"fnd-hist-sst-{uuid.uuid4().hex[:8]}",
                                 claim=(
-                                    f"Historical sea surface temperature off Karnataka Coast averages {sst_stats['mean']} °C "
+                                    f"Historical sea surface temperature off {loc_label} averages {sst_stats['mean']} °C "
                                     f"(median: {sst_stats['median']} °C, range: {sst_stats['min']} - {sst_stats['max']} °C "
                                     f"across {sst_stats['count']} records{gap_info})."
                                 ),
@@ -289,14 +304,14 @@ class OceanResearchAgent(BaseAgent):
                                 unit="°C",
                                 category=FindingCategory.HISTORICAL_RECORD,
                                 evidence_ids=[primary_hist_ev_id],
-                                uncertainty="Derived from validated multi-season ERA5 / Copernicus Marine reanalysis.",
+                                uncertainty=f"Derived from historical observations ({query_source}).",
                                 verification_status=VerificationStatus.UNVERIFIED,
                             )
                         )
 
-                    # Seasonal Breakdown Analysis
-                    if len(clean_dates) >= 4 and clean_waves:
-                        seasonal = compute_seasonal_breakdown(clean_dates, clean_waves, min_observations_per_season=2)
+                    # Seasonal Breakdown Analysis (preserving wave_dates with clean_waves)
+                    if len(wave_dates) >= 4 and clean_waves:
+                        seasonal = compute_seasonal_breakdown(wave_dates, clean_waves, min_observations_per_season=2)
                         for season_name, sstats in seasonal.items():
                             if sstats["is_adequate_coverage"] and sstats["count"] > 0:
                                 findings.append(
@@ -338,11 +353,19 @@ class OceanResearchAgent(BaseAgent):
                                 period_b_name="Southwest Monsoon",
                             )
                             if comp["valid_comparison"]:
+                                mean_diff = comp["mean_difference"]
+                                if mean_diff > 0:
+                                    diff_desc = f"{mean_diff} m higher"
+                                elif mean_diff < 0:
+                                    diff_desc = f"{abs(mean_diff)} m lower"
+                                else:
+                                    diff_desc = "identical (0.0 m difference)"
+
                                 findings.append(
                                     Finding(
                                         id=f"fnd-comp-monsoon-{uuid.uuid4().hex[:8]}",
                                         claim=(
-                                            f"Southwest Monsoon wave heights are {abs(comp['mean_difference'])} m higher "
+                                            f"Southwest Monsoon wave heights are {diff_desc} "
                                             f"(median diff: {comp['median_difference']} m, {comp['percentage_change']}% change) "
                                             f"compared to Post-Monsoon baseline."
                                         ),
@@ -355,10 +378,32 @@ class OceanResearchAgent(BaseAgent):
                                     )
                                 )
 
-                    # Anomaly check against historical baseline
-                    if len(clean_sst) >= 10:
+                    # Anomaly check requiring separate, sufficiently supported baseline and assessment periods
+                    assessment_sst = None
+                    baseline_sst = None
+                    if "assessment_sst" in task.context:
+                        assessment_sst = task.context["assessment_sst"]
                         baseline_sst = clean_sst
-                        anom = detect_anomalies(clean_sst, baseline_sst, threshold_sigma=2.0, min_baseline_samples=10)
+                    elif task.target_time:
+                        target_dt = task.target_time.replace(tzinfo=UTC) if task.target_time.tzinfo is None else task.target_time
+                        assessment_sst = [
+                            r.get("sea_surface_temperature_celsius") for r in target_hist
+                            if r.get("sea_surface_temperature_celsius") is not None
+                            and r.get("observation_time")
+                            and abs((r.get("observation_time") - target_dt).total_seconds()) <= 48 * 3600
+                        ]
+                        baseline_sst = [
+                            r.get("sea_surface_temperature_celsius") for r in target_hist
+                            if r.get("sea_surface_temperature_celsius") is not None
+                            and r.get("observation_time")
+                            and (target_dt - r.get("observation_time")).total_seconds() > 48 * 3600
+                        ]
+                    elif "baseline_sst" in task.context:
+                        baseline_sst = task.context["baseline_sst"]
+                        assessment_sst = clean_sst
+
+                    if baseline_sst is not None and assessment_sst is not None and len(baseline_sst) >= 10 and len(assessment_sst) >= 1:
+                        anom = detect_anomalies(assessment_sst, baseline_sst, threshold_sigma=2.0, min_baseline_samples=10)
                         if anom["eligible"]:
                             if anom["anomaly_detected"]:
                                 findings.append(
@@ -389,13 +434,14 @@ class OceanResearchAgent(BaseAgent):
                         else:
                             limitations.append(anom["limitation"])
                     else:
-                        limitations.append("Insufficient historical baseline depth (<10 samples) for statistical anomaly detection.")
+                        limitations.append("Statistical anomaly detection was not performed: requires separate, sufficiently supported baseline and assessment periods.")
 
             except Exception as e:
                 errors.append(f"Historical dataset processing error: {e!s}")
 
         # 4. Live Marine Observations Retrieval
-        live_obs, live_ev, live_limits = await self.live_client.fetch_marine_data(lat, lon)
+        is_demo_mode = bool(task.context.get("demo_mode", False))
+        live_obs, live_ev, live_limits = await self.live_client.fetch_marine_data(lat, lon, demo_mode=is_demo_mode)
         evidence_records.extend(live_ev)
         limitations.extend(live_limits)
 
@@ -415,14 +461,18 @@ class OceanResearchAgent(BaseAgent):
                         "observation_time": p.time,
                         "latitude": p.latitude,
                         "longitude": p.longitude,
+                        "sea_surface_temperature_celsius": p.sea_surface_temperature_celsius,
                         "wave_height_meters": p.wave_height_meters,
                         "wave_period_seconds": p.wave_period_seconds,
                         "wave_direction_degrees": p.wave_direction_degrees,
+                        "ocean_current_velocity_mps": p.ocean_current_velocity_mps,
+                        "ocean_current_direction_degrees": p.ocean_current_direction_degrees,
                         "wind_speed_knots": p.wind_speed_knots,
                         "wind_direction_degrees": p.wind_direction_degrees,
                         "chlorophyll_mg_m3": p.chlorophyll_mg_m3,
                         "metadata_json": {
                             "ingested_at": datetime.now(UTC).isoformat(),
+                            "is_demo": is_demo_mode,
                         },
                     })
                 await effective_query_service.repository.bulk_ingest(db_recs)
@@ -431,8 +481,30 @@ class OceanResearchAgent(BaseAgent):
 
         if live_obs:
             primary_live_ev_id = live_ev[0].id if live_ev else "ev-live-none"
+            raw_live_sst = [p.sea_surface_temperature_celsius for p in live_obs if p.sea_surface_temperature_celsius is not None]
             raw_live_waves = [p.wave_height_meters for p in live_obs if p.wave_height_meters is not None]
+            raw_live_currents = [p.ocean_current_velocity_mps for p in live_obs if p.ocean_current_velocity_mps is not None]
             raw_live_winds = [p.wind_speed_knots for p in live_obs if p.wind_speed_knots is not None]
+            prefix = "[DEMO FIXTURE] " if is_demo_mode else ""
+            finding_cat = FindingCategory.FORECAST
+
+            if raw_live_sst:
+                sst_stats = compute_series_stats(raw_live_sst)
+                findings.append(
+                    Finding(
+                        id=f"fnd-live-sst-{uuid.uuid4().hex[:8]}",
+                        claim=(
+                            f"{prefix}Near-surface sea temperature model forecast off {loc_label} averages {sst_stats['mean']} °C "
+                            f"(range: {sst_stats['min']} - {sst_stats['max']} °C across {sst_stats['count']} forecast hours)."
+                        ),
+                        value=sst_stats["mean"],
+                        unit="°C",
+                        category=finding_cat,
+                        evidence_ids=[primary_live_ev_id],
+                        uncertainty="DEMO FIXTURE / SAMPLE DATA" if is_demo_mode else "Numerical ocean circulation model forecast.",
+                        verification_status=VerificationStatus.UNVERIFIED,
+                    )
+                )
 
             if raw_live_waves:
                 w_stats = compute_series_stats(raw_live_waves)
@@ -440,14 +512,32 @@ class OceanResearchAgent(BaseAgent):
                     Finding(
                         id=f"fnd-live-wave-{uuid.uuid4().hex[:8]}",
                         claim=(
-                            f"Current wave observations off ({lat:.2f}°N, {lon:.2f}°E) indicate mean significant wave height "
+                            f"{prefix}Wave model forecast off {loc_label} indicates mean significant wave height "
                             f"of {w_stats['mean']} m (median: {w_stats['median']} m, range: {w_stats['min']} - {w_stats['max']} m)."
                         ),
                         value=w_stats["mean"],
                         unit="m",
-                        category=FindingCategory.OBSERVATION,
+                        category=finding_cat,
                         evidence_ids=[primary_live_ev_id],
-                        uncertainty="Short-term wave spectrum forecast model.",
+                        uncertainty="DEMO FIXTURE / SAMPLE DATA" if is_demo_mode else "Short-term wave spectrum numerical forecast model.",
+                        verification_status=VerificationStatus.UNVERIFIED,
+                    )
+                )
+
+            if raw_live_currents:
+                c_stats = compute_series_stats(raw_live_currents)
+                findings.append(
+                    Finding(
+                        id=f"fnd-live-current-{uuid.uuid4().hex[:8]}",
+                        claim=(
+                            f"{prefix}Ocean current model forecast off {loc_label} indicates mean current velocity "
+                            f"of {c_stats['mean']} m/s (peak: {c_stats['max']} m/s)."
+                        ),
+                        value=c_stats["mean"],
+                        unit="m/s",
+                        category=finding_cat,
+                        evidence_ids=[primary_live_ev_id],
+                        uncertainty="DEMO FIXTURE / SAMPLE DATA" if is_demo_mode else "Hydrodynamic ocean circulation model forecast.",
                         verification_status=VerificationStatus.UNVERIFIED,
                     )
                 )
@@ -458,14 +548,14 @@ class OceanResearchAgent(BaseAgent):
                     Finding(
                         id=f"fnd-live-wind-{uuid.uuid4().hex[:8]}",
                         claim=(
-                            f"Current offshore surface wind speed averages {wind_stats['mean']} knots "
+                            f"{prefix}Offshore surface wind speed averages {wind_stats['mean']} knots "
                             f"(median: {wind_stats['median']} knots, peak: {wind_stats['max']} knots)."
                         ),
                         value=wind_stats["mean"],
                         unit="knots",
-                        category=FindingCategory.OBSERVATION,
+                        category=finding_cat,
                         evidence_ids=[primary_live_ev_id],
-                        uncertainty="Standard 10-meter surface marine wind vector.",
+                        uncertainty="DEMO FIXTURE / SAMPLE DATA" if is_demo_mode else "10-meter surface marine wind forecast.",
                         verification_status=VerificationStatus.UNVERIFIED,
                     )
                 )
@@ -504,11 +594,13 @@ class OceanResearchAgent(BaseAgent):
         prompt_requested_unsupported = any(
             kw in prompt_lower for kw in ["chlorophyll", "salinity", "5 year", "five year", "decade", "decadal"]
         )
+        live_provider_failed = any("Live marine provider unavailable" in lim or "Live provider query error" in lim for lim in limitations)
+
         if errors and not findings:
             status = AgentStatus.FAILED
         elif not findings and not evidence_records:
             status = AgentStatus.UNAVAILABLE
-        elif prompt_requested_unsupported and findings:
+        elif (prompt_requested_unsupported or live_provider_failed) and findings:
             status = AgentStatus.PARTIAL
         elif findings:
             status = AgentStatus.COMPLETED

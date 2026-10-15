@@ -11,6 +11,8 @@ class MarineObservationPoint(BaseModel):
     wave_height_meters: Optional[float] = None
     wave_period_seconds: Optional[float] = None
     wave_direction_degrees: Optional[float] = None
+    ocean_current_velocity_mps: Optional[float] = None
+    ocean_current_direction_degrees: Optional[float] = None
     wind_speed_knots: Optional[float] = None
     wind_direction_degrees: Optional[float] = None
     chlorophyll_mg_m3: Optional[float] = None

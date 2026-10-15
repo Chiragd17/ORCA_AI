@@ -15,57 +15,75 @@ from app.schemas.investigations import WorkspaceType
 # -----------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_provider_connection_error_fallback():
-    """Simulates complete network disconnection (ConnectError)."""
+async def test_provider_connection_error_normal_mode_discloses_failure():
+    """In normal mode, network disconnection returns empty observations and discloses error without fabricating fixtures."""
     with patch("httpx.AsyncClient.get", side_effect=httpx.ConnectError("Connection refused by remote host")):
-        client = OpenMeteoMarineClient()
+        client = OpenMeteoMarineClient(demo_mode=False)
         obs, evs, limits = await client.fetch_marine_data(12.87, 74.88)
 
-        # Must fall back to labelled scientific baseline fixture
+        # Normal mode must NOT fall back to fixtures masquerading as live data
+        assert len(obs) == 0
+        assert len(evs) == 0
+        assert any("Live marine provider unavailable" in lim for lim in limits)
+
+
+@pytest.mark.asyncio
+async def test_provider_error_demo_mode_returns_explicit_demo_fixture():
+    """In explicit demo mode, provider failure loads labelled fixture clearly marked as DEMO DATA."""
+    with patch("httpx.AsyncClient.get", side_effect=httpx.ConnectError("Connection refused by remote host")):
+        client = OpenMeteoMarineClient(demo_mode=True)
+        obs, evs, limits = await client.fetch_marine_data(12.87, 74.88)
+
+        # In demo mode, sample fixture is returned with explicit demo labels
         assert len(obs) > 0
         assert len(evs) == 1
         assert evs[0].metadata.get("is_fixture") is True
-        assert any("Live provider query error" in lim for lim in limits)
-        assert any("scientific baseline fixture" in lim for lim in limits)
+        assert evs[0].metadata.get("is_demo") is True
+        assert "DEMO DATA" in evs[0].source_name
+        assert any("DEMO DATA" in lim for lim in limits)
+
 
 @pytest.mark.asyncio
-async def test_provider_timeout_fallback():
-    """Simulates provider request timeout."""
+async def test_provider_timeout_normal_mode():
+    """Simulates provider request timeout in normal mode."""
     with patch("httpx.AsyncClient.get", side_effect=httpx.TimeoutException("Read timed out after 12.0s")):
-        client = OpenMeteoMarineClient()
+        client = OpenMeteoMarineClient(demo_mode=False)
         obs, evs, limits = await client.fetch_marine_data(12.87, 74.88)
 
-        assert len(obs) > 0
-        assert evs[0].metadata.get("is_fixture") is True
-        assert any("timed out" in lim for lim in limits)
+        assert len(obs) == 0
+        assert len(evs) == 0
+        assert any("Live marine provider unavailable" in lim for lim in limits)
+
 
 @pytest.mark.asyncio
-async def test_provider_http_500_server_error():
-    """Simulates HTTP 500 Internal Server Error from Open-Meteo."""
+async def test_provider_http_500_server_error_normal_mode():
+    """Simulates HTTP 500 Internal Server Error from Open-Meteo in normal mode."""
     mock_resp = httpx.Response(status_code=500, request=httpx.Request("GET", "https://test.local"))
     with patch("httpx.AsyncClient.get", return_value=mock_resp):
-        client = OpenMeteoMarineClient()
+        client = OpenMeteoMarineClient(demo_mode=False)
         obs, evs, limits = await client.fetch_marine_data(12.87, 74.88)
 
-        assert len(obs) > 0
-        assert evs[0].metadata.get("is_fixture") is True
-        assert any("500" in lim for lim in limits)
+        assert len(obs) == 0
+        assert len(evs) == 0
+        assert any("Live marine provider unavailable" in lim for lim in limits)
+
 
 @pytest.mark.asyncio
-async def test_provider_http_429_rate_limit():
-    """Simulates HTTP 429 Too Many Requests response."""
+async def test_provider_http_429_rate_limit_normal_mode():
+    """Simulates HTTP 429 Too Many Requests response in normal mode."""
     mock_resp = httpx.Response(
         status_code=429,
         text="Rate limit exceeded",
         request=httpx.Request("GET", "https://test.local"),
     )
     with patch("httpx.AsyncClient.get", return_value=mock_resp):
-        client = OpenMeteoMarineClient()
+        client = OpenMeteoMarineClient(demo_mode=False)
         obs, evs, limits = await client.fetch_marine_data(12.87, 74.88)
 
-        assert len(obs) > 0
-        assert evs[0].metadata.get("is_fixture") is True
-        assert any("429" in lim for lim in limits)
+        assert len(obs) == 0
+        assert len(evs) == 0
+        assert any("Live marine provider unavailable" in lim for lim in limits)
+
 
 @pytest.mark.asyncio
 async def test_provider_malformed_json_payload():
@@ -76,11 +94,12 @@ async def test_provider_malformed_json_payload():
         request=httpx.Request("GET", "https://test.local"),
     )
     with patch("httpx.AsyncClient.get", return_value=mock_resp):
-        client = OpenMeteoMarineClient()
+        client = OpenMeteoMarineClient(demo_mode=False)
         obs, evs, limits = await client.fetch_marine_data(12.87, 74.88)
 
         # When hourly is missing, returns empty observations gracefully (no unhandled crash)
         assert len(obs) == 0
+
 
 # -----------------------------------------------------------------------------
 # 2. Historical Analysis Continuity During Live Provider Failure
@@ -91,7 +110,7 @@ async def test_historical_analysis_continuity_during_provider_outage():
     """
     Proves that when the live provider is down (HTTP 503),
     the agent still conducts valid historical analysis, period comparisons,
-    and anomaly detection using persisted/archived records.
+    and returns status=PARTIAL (never false COMPLETED).
     Historical records must NEVER be mislabelled as live observations.
     """
     mock_resp = httpx.Response(status_code=503, request=httpx.Request("GET", "https://test.local"))
@@ -100,20 +119,22 @@ async def test_historical_analysis_continuity_during_provider_outage():
         task = InvestigationTask(
             investigation_id="task-outage-continuity-01",
             workspace=WorkspaceType.MARINE_MONITORING,
-            prompt="Compare historical Southwest Monsoon sea state with Post-Monsoon wave baseline and check for thermal anomalies",
+            prompt="Compare historical Southwest Monsoon sea state with Post-Monsoon wave baseline",
             latitude=12.87,
             longitude=74.88,
         )
         result = await agent.run(task)
 
-        # Historical analysis must succeed despite live provider failure
-        assert result.status == AgentStatus.COMPLETED
+        # Historical analysis succeeds, but overall status is PARTIAL because live provider failed
+        assert result.status == AgentStatus.PARTIAL
         assert len(result.findings) >= 2
 
         # Verify no historical records are mislabelled as live observations
         hist_categories = {f.category for f in result.findings if "Karnataka Coast" in f.claim or "Monsoon" in f.claim}
         assert FindingCategory.OBSERVATION not in hist_categories
         assert FindingCategory.HISTORICAL_RECORD in hist_categories or FindingCategory.DETERMINISTIC_CALCULATION in hist_categories
+        assert any("Live marine provider unavailable" in lim for lim in result.limitations)
+
 
 @pytest.mark.asyncio
 async def test_zero_data_returns_unavailable_without_fabrication():
@@ -137,6 +158,6 @@ async def test_zero_data_returns_unavailable_without_fabrication():
     )
 
     result = await agent.run(task)
-    # Must report UNAVAILABLE or zero findings; never fabricate observations
+    # Must report UNAVAILABLE; never fabricate observations or false COMPLETED status
     assert len(result.findings) == 0
-    assert result.status in (AgentStatus.UNAVAILABLE, AgentStatus.FAILED, AgentStatus.PARTIAL)
+    assert result.status == AgentStatus.UNAVAILABLE

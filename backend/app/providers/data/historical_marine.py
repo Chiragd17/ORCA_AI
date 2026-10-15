@@ -169,7 +169,9 @@ class HistoricalMarineDataLoader:
         timeout: float = 12.0,
     ) -> tuple[list[dict[str, Any]], EvidenceRecord | None, list[str]]:
         """
-        Queries Open-Meteo Historical Archive API for past marine/weather reanalysis.
+        Queries Open-Meteo Historical Archive API for past atmospheric weather reanalysis.
+        Note: temperature_2m is 2-meter atmospheric air temperature, NOT sea surface temperature.
+        SST is marked unavailable for this endpoint.
         """
         limitations: list[str] = []
         archive_url = "https://archive-api.open-meteo.com/v1/archive"
@@ -190,22 +192,29 @@ class HistoricalMarineDataLoader:
 
             hourly = data.get("hourly", {})
             times = hourly.get("time", [])
-            temps = hourly.get("temperature_2m", [])
+            temps_air_2m = hourly.get("temperature_2m", [])
             winds = hourly.get("wind_speed_10m", [])
+            wind_dirs = hourly.get("wind_direction_10m", [])
 
             ev_id = f"ev-era5-live-{uuid.uuid4().hex[:10]}"
             evidence = EvidenceRecord(
                 id=ev_id,
-                source_name="Open-Meteo ERA5 Historical Archive",
+                source_name="Open-Meteo ERA5 Atmospheric Weather Archive",
                 source_uri=f"{archive_url}?latitude={latitude}&longitude={longitude}",
                 observation_time=datetime.fromisoformat(times[0].replace("Z", "+00:00")) if times else None,
                 retrieval_time=datetime.now(UTC),
                 latitude=latitude,
                 longitude=longitude,
-                data_type="historical_reanalysis_series",
+                data_type="historical_weather_reanalysis",
                 value={"sample_count": len(times)},
-                unit="°C, km/h",
-                metadata={"dataset": "ERA5 reanalysis", "is_historical": True},
+                unit="°C (air), km/h (wind)",
+                metadata={
+                    "dataset": "ERA5 atmospheric reanalysis",
+                    "is_historical": True,
+                    "sea_surface_temperature_available": False,
+                    "air_temperature_2m_available": True,
+                    "license": "Copernicus Climate Change Service / ECMWF ERA5 Open Data",
+                },
             )
 
             records = []
@@ -213,22 +222,34 @@ class HistoricalMarineDataLoader:
                 dt = datetime.fromisoformat(times[i].replace("Z", "+00:00"))
                 # wind_speed_10m is km/h -> convert to knots: 1 km/h = 0.539957 knots
                 wind_knots = round(winds[i] * 0.539957, 1) if i < len(winds) and winds[i] is not None else None
+                wind_dir = wind_dirs[i] if i < len(wind_dirs) and wind_dirs[i] is not None else None
+                air_temp = temps_air_2m[i] if i < len(temps_air_2m) else None
                 records.append({
-                    "source_id": "open_meteo_archive",
+                    "source_id": "open_meteo_weather_archive",
                     "observation_time": dt,
                     "latitude": latitude,
                     "longitude": longitude,
-                    "sea_surface_temperature_celsius": temps[i] if i < len(temps) else None,
+                    # SST is NOT 2m air temperature; marked unavailable
+                    "sea_surface_temperature_celsius": None,
                     "wave_height_meters": None,
                     "wave_period_seconds": None,
                     "wave_direction_degrees": None,
                     "wind_speed_knots": wind_knots,
-                    "wind_direction_degrees": None,
+                    "wind_direction_degrees": wind_dir,
                     "chlorophyll_mg_m3": None,
-                    "metadata_json": {"is_historical": True, "evidence_id": ev_id},
+                    "metadata_json": {
+                        "is_historical": True,
+                        "evidence_id": ev_id,
+                        "temperature_2m_celsius": air_temp,
+                    },
                 })
+
+            limitations.append(
+                "Open-Meteo Historical Weather Archive provides 2m atmospheric air temperature (temperature_2m) and 10m wind, "
+                "NOT sea surface temperature (SST). Sea surface temperature is marked unavailable."
+            )
             return records, evidence, limitations
 
         except Exception as e:
-            limitations.append(f"Historical archive query failed ({e!s}). Falling back to local scientific archive.")
+            limitations.append(f"Historical archive query failed ({e!s}).")
             return [], None, limitations

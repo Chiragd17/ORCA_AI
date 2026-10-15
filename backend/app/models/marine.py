@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, Float, DateTime, ForeignKey, Text, JSON
+from sqlalchemy import String, Float, DateTime, ForeignKey, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
@@ -18,6 +18,15 @@ class DataSource(Base):
 
 class MarineObservation(Base):
     __tablename__ = "marine_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "observation_time",
+            "latitude",
+            "longitude",
+            name="uq_marine_obs_source_time_lat_lon",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     source_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id"), index=True)
@@ -30,6 +39,8 @@ class MarineObservation(Base):
     wave_height_meters: Mapped[Optional[float]] = mapped_column(Float)
     wave_period_seconds: Mapped[Optional[float]] = mapped_column(Float)
     wave_direction_degrees: Mapped[Optional[float]] = mapped_column(Float)
+    ocean_current_velocity_mps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ocean_current_direction_degrees: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     wind_speed_knots: Mapped[Optional[float]] = mapped_column(Float)
     wind_direction_degrees: Mapped[Optional[float]] = mapped_column(Float)
     chlorophyll_mg_m3: Mapped[Optional[float]] = mapped_column(Float)
