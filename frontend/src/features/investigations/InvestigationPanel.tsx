@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { WorkspaceType, InvestigationResponse, ExecutionEvent, EvidenceRecord } from '../../types';
 import { apiClient } from '../../lib/api-client';
-import { Play, CheckCircle2, AlertCircle, Clock, Database, ShieldCheck } from 'lucide-react';
+import { Play, CheckCircle2, AlertCircle, Clock, Database } from 'lucide-react';
 
 interface InvestigationPanelProps {
   workspace: WorkspaceType;
