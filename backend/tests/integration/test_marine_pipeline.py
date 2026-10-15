@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from app.db.base import Base
 from app.db.repositories.marine import MarineRepository
+from app.providers.data.historical_marine import HistoricalMarineDataLoader
 
 @pytest.fixture
 async def in_memory_db():
@@ -62,6 +63,37 @@ async def test_marine_repository_idempotency(in_memory_db: AsyncSession):
     assert len(stored) == 1
     assert stored[0].wave_height_meters == 1.4
     assert stored[0].sea_surface_temperature_celsius == 28.9
+
+@pytest.mark.asyncio
+async def test_marine_repository_historical_ingestion(in_memory_db: AsyncSession):
+    repo = MarineRepository(in_memory_db)
+    loader = HistoricalMarineDataLoader()
+    records, evidence, counts = loader.load_local_dataset()
+
+    await repo.ensure_data_source(
+        source_id="historical_archive",
+        name=evidence.source_name,
+        base_url=evidence.source_uri,
+    )
+
+    # Ingest all historical records
+    ingest_res = await repo.bulk_ingest(records)
+    assert ingest_res["processed"] == counts["valid"]
+    assert ingest_res["inserted"] == counts["valid"]
+    assert ingest_res["failed"] == 0
+
+    # Re-run same batch to verify zero duplicate creation
+    reingest_res = await repo.bulk_ingest(records)
+    assert reingest_res["inserted"] == 0
+    assert reingest_res["updated"] == counts["valid"]
+
+    # Spatial query for Karnataka Coast offshore records
+    queried = await repo.query_observations(
+        latitude=12.87,
+        longitude=74.88,
+        radius_km=25.0,
+    )
+    assert len(queried) == counts["valid"]
 
 @pytest.mark.asyncio
 async def test_marine_repository_spatial_filtering(in_memory_db: AsyncSession):
