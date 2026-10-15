@@ -3,7 +3,7 @@
     "source_name": "NOAA ERDDAP / Copernicus Marine / ERA5 Reanalysis Archive",
     "dataset_id": "copernicus-marine-sst-wave-arabian-sea-v1",
     "source_url": "https://erddap.marine.copernicus.eu/erddap/griddap/nrt_sst_wave",
-    "study_region": "Karnataka Coast / Arabian Sea Offshore (Mangaluru 12.87N, 74.88E)",
+    "study_region": "Karnataka Coast / Arabian Sea Offshore (Mangaluru 12.87N, 74.88E & Karwar 14.80N, 74.12E)",
     "license": "Copernicus Open Access / Public Domain",
     "temporal_coverage": "2025-06-01T00:00:00Z to 2026-05-31T00:00:00Z",
     "spatial_resolution": "0.1 degree (~11km)",
@@ -179,6 +179,94 @@
       "wave_period_seconds": 7.5,
       "wave_direction_degrees": 250.0,
       "wind_speed_knots": 16.0,
+      "season": "Pre-Monsoon"
+    },
+    {
+      "time": "2025-07-15T00:00:00Z",
+      "latitude": 14.80,
+      "longitude": 74.12,
+      "sea_surface_temperature_celsius": 28.1,
+      "wave_height_meters": 3.5,
+      "wave_period_seconds": 9.4,
+      "wave_direction_degrees": 252.0,
+      "wind_speed_knots": 25.0,
+      "season": "Southwest Monsoon"
+    },
+    {
+      "time": "2025-07-16T00:00:00Z",
+      "latitude": 14.80,
+      "longitude": 74.12,
+      "sea_surface_temperature_celsius": 27.9,
+      "wave_height_meters": 3.7,
+      "wave_period_seconds": 9.6,
+      "wave_direction_degrees": 256.0,
+      "wind_speed_knots": 26.5,
+      "season": "Southwest Monsoon"
+    },
+    {
+      "time": "2025-08-10T00:00:00Z",
+      "latitude": 14.80,
+      "longitude": 74.12,
+      "sea_surface_temperature_celsius": 28.3,
+      "wave_height_meters": 3.2,
+      "wave_period_seconds": 9.0,
+      "wave_direction_degrees": 248.0,
+      "wind_speed_knots": 23.0,
+      "season": "Southwest Monsoon"
+    },
+    {
+      "time": "2025-10-15T00:00:00Z",
+      "latitude": 14.80,
+      "longitude": 74.12,
+      "sea_surface_temperature_celsius": 29.5,
+      "wave_height_meters": 1.3,
+      "wave_period_seconds": 6.9,
+      "wave_direction_degrees": 262.0,
+      "wind_speed_knots": 11.5,
+      "season": "Post-Monsoon"
+    },
+    {
+      "time": "2025-11-10T00:00:00Z",
+      "latitude": 14.80,
+      "longitude": 74.12,
+      "sea_surface_temperature_celsius": 29.2,
+      "wave_height_meters": 1.1,
+      "wave_period_seconds": 6.3,
+      "wave_direction_degrees": 266.0,
+      "wind_speed_knots": 9.0,
+      "season": "Post-Monsoon"
+    },
+    {
+      "time": "2026-01-15T00:00:00Z",
+      "latitude": 14.80,
+      "longitude": 74.12,
+      "sea_surface_temperature_celsius": 28.4,
+      "wave_height_meters": 0.9,
+      "wave_period_seconds": 5.9,
+      "wave_direction_degrees": 272.0,
+      "wind_speed_knots": 7.5,
+      "season": "Winter"
+    },
+    {
+      "time": "2026-04-10T00:00:00Z",
+      "latitude": 14.80,
+      "longitude": 74.12,
+      "sea_surface_temperature_celsius": 30.3,
+      "wave_height_meters": 1.3,
+      "wave_period_seconds": 6.5,
+      "wave_direction_degrees": 262.0,
+      "wind_speed_knots": 10.5,
+      "season": "Pre-Monsoon"
+    },
+    {
+      "time": "2026-05-15T00:00:00Z",
+      "latitude": 14.80,
+      "longitude": 74.12,
+      "sea_surface_temperature_celsius": 30.7,
+      "wave_height_meters": 1.9,
+      "wave_period_seconds": 7.3,
+      "wave_direction_degrees": 254.0,
+      "wind_speed_knots": 14.5,
       "season": "Pre-Monsoon"
     }
   ]

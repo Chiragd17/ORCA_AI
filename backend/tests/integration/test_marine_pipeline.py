@@ -4,6 +4,10 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from app.db.base import Base
 from app.db.repositories.marine import MarineRepository
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
+from app.agents.ocean_research.agent import OceanResearchAgent
+from app.agents.base import InvestigationTask, AgentStatus
+from app.schemas.investigations import WorkspaceType
+from app.schemas.evidence import FindingCategory
 
 @pytest.fixture
 async def in_memory_db():
@@ -87,13 +91,29 @@ async def test_marine_repository_historical_ingestion(in_memory_db: AsyncSession
     assert reingest_res["inserted"] == 0
     assert reingest_res["updated"] == counts["valid"]
 
-    # Spatial query for Karnataka Coast offshore records
-    queried = await repo.query_observations(
+    # Spatial query for Mangaluru station offshore records (within 25km)
+    mangaluru_records = await repo.query_observations(
         latitude=12.87,
         longitude=74.88,
         radius_km=25.0,
     )
-    assert len(queried) == counts["valid"]
+    assert len(mangaluru_records) == 15
+
+    # Spatial query for Karwar station offshore records (within 25km)
+    karwar_records = await repo.query_observations(
+        latitude=14.80,
+        longitude=74.12,
+        radius_km=25.0,
+    )
+    assert len(karwar_records) == 8
+
+    # Regional query encompassing both stations (within 300km)
+    all_regional = await repo.query_observations(
+        latitude=13.50,
+        longitude=74.50,
+        radius_km=300.0,
+    )
+    assert len(all_regional) == counts["valid"]
 
 @pytest.mark.asyncio
 async def test_marine_repository_spatial_filtering(in_memory_db: AsyncSession):
@@ -125,3 +145,36 @@ async def test_marine_repository_spatial_filtering(in_memory_db: AsyncSession):
     nearby = await repo.query_observations(latitude=12.87, longitude=74.88, radius_km=50.0)
     assert len(nearby) == 1
     assert nearby[0].latitude == 12.87
+
+@pytest.mark.asyncio
+async def test_ocean_research_agent_with_persisted_repository(in_memory_db: AsyncSession):
+    repo = MarineRepository(in_memory_db)
+    loader = HistoricalMarineDataLoader()
+    records, evidence, _ = loader.load_local_dataset()
+
+    await repo.ensure_data_source(
+        source_id="historical_archive",
+        name=evidence.source_name,
+        base_url=evidence.source_uri,
+    )
+    await repo.bulk_ingest(records)
+
+    # Instantiate agent injected with persisted database repository
+    agent = OceanResearchAgent(marine_repository=repo)
+    task = InvestigationTask(
+        investigation_id="task-persisted-repo-01",
+        workspace=WorkspaceType.MARINE_MONITORING,
+        prompt="Analyze historical sea state and compare Southwest Monsoon waves against Post-Monsoon baseline",
+        latitude=12.87,
+        longitude=74.88,
+    )
+
+    result = await agent.run(task)
+    assert result.agent_id == "ocean_research"
+    assert result.status == AgentStatus.COMPLETED
+    assert len(result.findings) >= 2
+
+    # Verify deterministic calculation from database records
+    comp_findings = [f for f in result.findings if f.category == FindingCategory.DETERMINISTIC_CALCULATION]
+    assert len(comp_findings) > 0
+
