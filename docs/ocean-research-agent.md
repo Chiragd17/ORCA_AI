@@ -2,7 +2,7 @@
 
 ## Overview
 The **Ocean Intelligence & Research Agent** (`ocean_research`) performs deterministic analysis of marine conditions, sea-surface temperatures (SST), wave spectra, ocean currents, seasonal cycles, and thermal anomaly baselines. It utilizes the ORCA hybrid marine data architecture combining:
-1. **Historical Reanalysis Data**: Multi-season validated archive (`data/processed/arabian_sea_historical_2025_2026.json` from Copernicus Marine / ERA5 reanalysis).
+1. **Historical Reanalysis Data**: Curated seasonal reference sample fixture (`data/processed/arabian_sea_historical_2025_2026.json` providing representative Karnataka offshore baseline ranges).
 2. **Live Ingestion Feeds**: Near-real-time atmospheric and wave observations via Open-Meteo Marine API.
 3. **Persistent Data Layer**: PostgreSQL `marine_observations` and `data_sources` accessed via `MarineRepository`.
 
@@ -154,18 +154,18 @@ In Phase 5, the Ocean Intelligence & Research Agent was fully verified within OR
 
 ## Data Sources Catalog & Specifications
 
-| Attribute | Source 1: Historical Reanalysis Archive | Source 2: Near-Real-Time Live Ingestion Feed |
+| Attribute | Source 1: Curated Reference Sample Fixture | Source 2: Near-Real-Time Live Ingestion Feed |
 |---|---|---|
-| **Provider / Dataset Name** | Copernicus Marine / ERA5 Reanalysis Archive | Open-Meteo Marine API |
-| **Dataset Identifier / URL** | `copernicus-marine-sst-wave-arabian-sea-v1` (`https://erddap.marine.copernicus.eu`) | `https://marine-api.open-meteo.com/v1/marine` |
+| **Provider / Dataset Name** | Arabian Sea Regional Reference Sample Fixture (Curated Benchmark / ERA5 Representative Baseline) | Open-Meteo Marine API |
+| **Dataset Identifier / URL** | `arabian-sea-benchmark-sample-2025-2026` (`data/processed/arabian_sea_historical_2025_2026.json`) | `https://marine-api.open-meteo.com/v1/marine` |
 | **Supported Variables** | Sea surface temperature, wave height, wave period, wave direction, wind speed | Wave height, wave period, wave direction, ocean current velocity, current direction |
 | **Geographic Coverage** | Karnataka Coast / Arabian Sea Offshore (Mangaluru 12.87°N, 74.88°E & Karwar 14.80°N, 74.12°E) | Global marine grid (WGS84 lat: [-90, 90], lon: [-180, 180]) |
-| **Temporal Coverage** | June 1, 2025 to May 31, 2026 (multi-season annual cycle) | Near-real-time hourly forecast (7-day window) |
+| **Temporal Coverage** | Discrete seasonal samples across 2025-06-01 to 2026-05-31 (23 discrete benchmark records) | Near-real-time hourly forecast (7-day window) |
 | **Measurement Units** | SST (°C), Wave Height (m), Wave Period (s), Wave Direction (deg), Wind Speed (knots) | Wave Height (m), Wave Period (s), Direction (deg), Current (m/s) |
-| **Licensing** | Copernicus Open Access / Public Domain | Open-Meteo Non-Commercial / Attribution Required |
+| **Licensing** | Public Domain / Testing & Benchmark Sample Fixture | Open-Meteo Non-Commercial / Attribution Required |
 | **Required Credentials** | None (public local processed dataset `data/processed/...`) | None (public non-commercial tier); optional API key for high throughput |
-| **Publication Frequency** | Static validated multi-season baseline reanalysis | Updated every 1 to 3 hours from GFS/ECMWF numerical wave models |
-| **Known Limitations** | Excludes optical ocean color (chlorophyll) and salinity | Excludes optical chlorophyll-a; SST is proxied/reanalyzed |
+| **Publication Frequency** | Static curated test fixture for deterministic testing and baseline validation | Updated every 1 to 3 hours from GFS/ECMWF numerical wave models |
+| **Known Limitations** | Not an exhaustive or continuous scientific archive; represents 23 discrete offshore sample points | Excludes optical chlorophyll-a; SST is proxied/reanalyzed |
 | **Verification Status** | **100% Verified**: Processed records validated against physical bounds and ingested idempotently | **100% Verified**: Tested live via HTTP 200 OK and resilient under 429/500/503/timeout simulations |
 
 ---
@@ -257,3 +257,15 @@ Live data can be queried and ingested via:
 # Run Phase 4 scientific validation and provider resilience tests
 .venv/bin/pytest backend/tests/unit/test_scientific_validation.py backend/tests/unit/test_provider_resilience.py -v
 ```
+
+---
+
+## Shared Integration Blockers & Handoff Specifications
+
+The Ocean Intelligence & Research Agent is fully implemented and passes all unit and integration tests within Person 1 scope. The following cross-cutting architectural blockers exist outside Person 1 ownership and are recorded here for the relevant module owners:
+
+| Blocker ID | Affected Component | Responsible Owner | Nature & Description | Action Required |
+|---|---|---|---|---|
+| **BLOCKER-01** | `backend/alembic/versions/` | Shared Database / Schema Owner | Missing Alembic migration revisions. The directory currently only contains `.gitkeep`. Although SQLAlchemy models exist in `backend/app/models/`, no versioned migration file exists to reproducibly create or migrate the PostgreSQL database. | Generate and commit the baseline Alembic revision (e.g. `alembic revision --autogenerate -m "initial_schema"`). |
+| **BLOCKER-02** | `backend/app/orchestrator/service.py` | Orchestrator / Platform Owner | Orchestrator state is stored in in-memory dictionaries (`_investigations`, `_event_buses`, `_evidence_registries`) instead of persisting investigations, status events, and agent findings to PostgreSQL across application restarts. | Implement database persistence in `OrchestratorService` and inject `MarineRepository` or `AsyncSession` into `InvestigationTask.context`. |
+

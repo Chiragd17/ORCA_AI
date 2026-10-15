@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.marine import DataSource, MarineObservation
 from app.utils import haversine_distance_km
+
+Tuple_Result = Tuple[str, MarineObservation]
+
 
 class MarineRepository:
     """
@@ -151,5 +156,3 @@ class MarineRepository:
             if haversine_distance_km(latitude, longitude, obs.latitude, obs.longitude) <= radius_km
         ]
         return refined
-
-Tuple_Result = tuple[str, MarineObservation]

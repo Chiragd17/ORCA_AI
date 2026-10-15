@@ -4,7 +4,7 @@ ORCA Marine Data Ingestion CLI (Person 1 Ownership).
 Idempotently fetches, validates, and persists marine observations into PostgreSQL.
 Supports:
     --live           : Fetch live observations from Open-Meteo Marine API
-    --historical     : Ingest validated multi-season scientific historical records
+    --historical     : Ingest curated seasonal baseline reference sample fixture
     --use-fixture    : Ingest offline baseline fixture
 """
 import sys
@@ -53,7 +53,7 @@ async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str = No
         obs, ev_list = client._load_scientific_fixture(lat, lon)
         print(f"Loaded {len(obs)} records from scientific baseline fixture.")
         source_id = "scientific_fixture"
-        source_name = "Arabian Sea Scientific Baseline"
+        source_name = "Arabian Sea Scientific Baseline (Labelled Fixture)"
         evidence_id = ev_list[0].id if ev_list else None
         for p in obs:
             records.append({

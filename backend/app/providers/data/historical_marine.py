@@ -57,13 +57,16 @@ class HistoricalMarineDataLoader:
             latitude=12.87,
             longitude=74.88,
             data_type="historical_oceanographic_series",
-            value={"dataset_id": meta.get("dataset_id")},
+            value={"dataset_id": meta.get("dataset_id"), "sample_count": len(raw_data.get("records", []))},
             unit="°C, m, s, knots",
             metadata={
                 "temporal_coverage": meta.get("temporal_coverage"),
-                "license": meta.get("license"),
+                "license": meta.get("license", "Public Domain / Testing Sample Fixture"),
                 "spatial_resolution": meta.get("spatial_resolution"),
                 "is_historical": True,
+                "is_sample_fixture": True,
+                "data_nature": meta.get("data_nature", "sample_reference_fixture"),
+                "is_authoritative_bulk_archive": False,
             },
         )
 
@@ -76,6 +79,7 @@ class HistoricalMarineDataLoader:
                 # 1. Parse time
                 time_str = rec.get("time")
                 if not time_str:
+                    logger.warning(f"Rejected record with missing timestamp: {rec}")
                     counts["rejected"] += 1
                     continue
                 obs_time = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
@@ -84,6 +88,7 @@ class HistoricalMarineDataLoader:
                 lat = float(rec["latitude"])
                 lon = float(rec["longitude"])
                 if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                    logger.warning(f"Rejected record out of WGS84 coordinate bounds: lat={lat}, lon={lon}")
                     counts["rejected"] += 1
                     continue
 
@@ -92,6 +97,7 @@ class HistoricalMarineDataLoader:
                 if sst is not None:
                     sst = float(sst)
                     if not (-2.0 <= sst <= 45.0):
+                        logger.warning(f"Rejected record with implausible SST: {sst}°C (bounds: -2.0 to 45.0)")
                         counts["rejected"] += 1
                         continue
 
@@ -99,6 +105,7 @@ class HistoricalMarineDataLoader:
                 if wave_h is not None:
                     wave_h = float(wave_h)
                     if not (0.0 <= wave_h <= 35.0):
+                        logger.warning(f"Rejected record with implausible wave height: {wave_h}m (bounds: 0.0 to 35.0)")
                         counts["rejected"] += 1
                         continue
 
@@ -106,6 +113,7 @@ class HistoricalMarineDataLoader:
                 if wave_p is not None:
                     wave_p = float(wave_p)
                     if not (0.0 <= wave_p <= 40.0):
+                        logger.warning(f"Rejected record with implausible wave period: {wave_p}s (bounds: 0.0 to 40.0)")
                         counts["rejected"] += 1
                         continue
 
@@ -113,6 +121,7 @@ class HistoricalMarineDataLoader:
                 if wave_dir is not None:
                     wave_dir = float(wave_dir)
                     if not (0.0 <= wave_dir <= 360.0):
+                        logger.warning(f"Rejected record with implausible wave direction: {wave_dir}° (bounds: 0.0 to 360.0)")
                         counts["rejected"] += 1
                         continue
 
@@ -120,6 +129,7 @@ class HistoricalMarineDataLoader:
                 if wind_spd is not None:
                     wind_spd = float(wind_spd)
                     if not (0.0 <= wind_spd <= 200.0):
+                        logger.warning(f"Rejected record with implausible wind speed: {wind_spd} knots (bounds: 0.0 to 200.0)")
                         counts["rejected"] += 1
                         continue
 
@@ -138,6 +148,7 @@ class HistoricalMarineDataLoader:
                     "chlorophyll_mg_m3": rec.get("chlorophyll_mg_m3"),
                     "metadata_json": {
                         "is_historical": True,
+                        "is_sample_fixture": True,
                         "season": rec.get("season"),
                         "evidence_id": ev_id,
                     },

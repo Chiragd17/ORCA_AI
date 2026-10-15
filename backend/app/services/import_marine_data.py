@@ -30,7 +30,7 @@ async def import_historical_marine_data(dataset_path: Optional[str] = None) -> D
                 source_id="copernicus_marine_era5",
                 name=evidence.source_name,
                 base_url=evidence.source_uri,
-                description="Validated multi-season reanalysis archive (SST, waves, currents, wind)",
+                description="Curated seasonal reference sample fixture for regional baseline testing (SST, waves, wind)",
                 license_info=evidence.metadata.get("license"),
             )
             # Execute idempotent bulk upsert

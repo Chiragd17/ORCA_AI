@@ -1,12 +1,15 @@
 {
   "dataset_metadata": {
-    "source_name": "NOAA ERDDAP / Copernicus Marine / ERA5 Reanalysis Archive",
-    "dataset_id": "copernicus-marine-sst-wave-arabian-sea-v1",
-    "source_url": "https://erddap.marine.copernicus.eu/erddap/griddap/nrt_sst_wave",
+    "source_name": "Arabian Sea Regional Reference Sample Fixture (Curated Benchmark / ERA5 Representative Baseline)",
+    "dataset_id": "arabian-sea-benchmark-sample-2025-2026",
+    "data_nature": "sample_reference_fixture",
+    "is_authoritative_bulk_archive": false,
+    "description": "Curated 23-record reference sample fixture representing seasonal oceanographic ranges for the Karnataka Coast (Mangaluru 12.87N, 74.88E & Karwar 14.80N, 74.12E). Used for offline testing, pipeline validation, and seasonal baseline calculation. This file is a curated test fixture and not an authoritative, continuous scientific archive.",
     "study_region": "Karnataka Coast / Arabian Sea Offshore (Mangaluru 12.87N, 74.88E & Karwar 14.80N, 74.12E)",
-    "license": "Copernicus Open Access / Public Domain",
-    "temporal_coverage": "2025-06-01T00:00:00Z to 2026-05-31T00:00:00Z",
-    "spatial_resolution": "0.1 degree (~11km)",
+    "sample_record_count": 23,
+    "temporal_coverage": "2025-06-01 to 2026-05-31 (discrete seasonal representative samples)",
+    "spatial_resolution": "0.1 degree offshore sample points",
+    "license": "Public Domain / Testing Sample Fixture",
     "units": {
       "sea_surface_temperature": "celsius",
       "wave_height": "meters",
