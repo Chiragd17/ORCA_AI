@@ -4,6 +4,10 @@ from app.schemas.marine import MarineObservationResponse, MarineObservationPoint
 
 router = APIRouter()
 
+from app.providers.data.open_meteo import OpenMeteoMarineClient
+
+client = OpenMeteoMarineClient()
+
 @router.get("/observations", response_model=MarineObservationResponse, tags=["Marine"])
 async def get_marine_observations(
     lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude in WGS84"),
@@ -12,14 +16,16 @@ async def get_marine_observations(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
 ):
     """
-    Retrieves marine observations (SST, wave height, winds, chlorophyll) for the requested coordinates.
+    Retrieves marine observations (waves, currents, sea state) for the requested coordinates.
     """
-    # Baseline contract response
+    obs, evidence_records, limitations = await client.fetch_marine_data(
+        latitude=lat, longitude=lon, start_date=start_date, end_date=end_date
+    )
     return MarineObservationResponse(
         latitude=lat,
         longitude=lon,
-        source="Open-Meteo Marine API / Local Store",
-        observations=[],
-        evidence=[],
-        limitations=["Marine observations endpoint ready for live data provider ingestion."],
+        source="Open-Meteo Marine API",
+        observations=obs,
+        evidence=evidence_records,
+        limitations=limitations,
     )
