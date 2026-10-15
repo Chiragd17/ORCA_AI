@@ -250,3 +250,25 @@ async def test_marine_repository_metadata_and_provenance_retention(in_memory_db:
     assert meta["reanalysis_grid"] == "0.1deg"
 
 
+@pytest.mark.asyncio
+async def test_import_historical_marine_data_service(in_memory_db: AsyncSession):
+    """
+    Verifies that the import_historical_marine_data service ingests the real processed
+    scientific dataset into the repository with 100% success and zero validation failures.
+    """
+    from unittest.mock import patch
+    from contextlib import asynccontextmanager
+    from app.services.import_marine_data import import_historical_marine_data
+
+    @asynccontextmanager
+    async def mock_session():
+        yield in_memory_db
+
+    with patch("app.services.import_marine_data.AsyncSessionLocal", side_effect=mock_session):
+        res = await import_historical_marine_data()
+        assert res["status"] == "success"
+        assert res["loaded_counts"]["valid"] == 23
+        assert res["ingest_summary"]["inserted"] == 23
+        assert res["ingest_summary"]["failed"] == 0
+
+

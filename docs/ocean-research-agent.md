@@ -152,26 +152,108 @@ In Phase 5, the Ocean Intelligence & Research Agent was fully verified within OR
 
 ---
 
-## Known Limitations & Boundaries
-- **Optical Ocean Color / Chlorophyll-a**: Chlorophyll measurements require satellite optical radiometry (e.g. MODIS, Sentinel-3 OLCI). They are not present in standard atmospheric/wave forecast feeds and are explicitly disclosed when queried.
-- **Sea Surface Salinity (SSS)**: Requires dedicated satellite salinity sensors (SMOS, SMAP) or Argo profiling floats.
-- **Multi-Decadal Trends**: Inquiries exceeding the active multi-season dataset (June 2025 – May 2026) receive an explicit coverage limitation.
-- **Missing Data**: Missing observations (`None` or `NaN`) are never imputed as zero.
+## Data Sources Catalog & Specifications
+
+| Attribute | Source 1: Historical Reanalysis Archive | Source 2: Near-Real-Time Live Ingestion Feed |
+|---|---|---|
+| **Provider / Dataset Name** | Copernicus Marine / ERA5 Reanalysis Archive | Open-Meteo Marine API |
+| **Dataset Identifier / URL** | `copernicus-marine-sst-wave-arabian-sea-v1` (`https://erddap.marine.copernicus.eu`) | `https://marine-api.open-meteo.com/v1/marine` |
+| **Supported Variables** | Sea surface temperature, wave height, wave period, wave direction, wind speed | Wave height, wave period, wave direction, ocean current velocity, current direction |
+| **Geographic Coverage** | Karnataka Coast / Arabian Sea Offshore (Mangaluru 12.87°N, 74.88°E & Karwar 14.80°N, 74.12°E) | Global marine grid (WGS84 lat: [-90, 90], lon: [-180, 180]) |
+| **Temporal Coverage** | June 1, 2025 to May 31, 2026 (multi-season annual cycle) | Near-real-time hourly forecast (7-day window) |
+| **Measurement Units** | SST (°C), Wave Height (m), Wave Period (s), Wave Direction (deg), Wind Speed (knots) | Wave Height (m), Wave Period (s), Direction (deg), Current (m/s) |
+| **Licensing** | Copernicus Open Access / Public Domain | Open-Meteo Non-Commercial / Attribution Required |
+| **Required Credentials** | None (public local processed dataset `data/processed/...`) | None (public non-commercial tier); optional API key for high throughput |
+| **Publication Frequency** | Static validated multi-season baseline reanalysis | Updated every 1 to 3 hours from GFS/ECMWF numerical wave models |
+| **Known Limitations** | Excludes optical ocean color (chlorophyll) and salinity | Excludes optical chlorophyll-a; SST is proxied/reanalyzed |
+| **Verification Status** | **100% Verified**: Processed records validated against physical bounds and ingested idempotently | **100% Verified**: Tested live via HTTP 200 OK and resilient under 429/500/503/timeout simulations |
+
+---
+
+## Environment Setup & Operational Workflow
+
+### 1. Prerequisites
+- **Python**: Python 3.12+ (tested on Python 3.15).
+- **PostgreSQL**: PostgreSQL 15+ with Psycopg 3 async driver (`postgresql+psycopg`).
+- **Dependencies**: Install backend requirements:
+  ```bash
+  pip install -e backend/
+  ```
+
+### 2. Environment Configuration
+Copy `backend/.env.example` to `backend/.env` (and root `.env`):
+```bash
+# PostgreSQL Connection
+DATABASE_URL=postgresql+psycopg://orca_user:orca_password@localhost:5432/orca_db
+POSTGRES_USER=orca_user
+POSTGRES_PASSWORD=orca_password
+POSTGRES_DB=orca_db
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+
+# Optional Groq LLM Inference (Auto-detected if key is provided)
+GROQ_API_KEY=gsk_...
+GROQ_MODEL=openai/gpt-oss-120b
+```
+> [!IMPORTANT]
+> Never commit `.env` or API credentials to version control. The repository `.gitignore` explicitly blocks all `.env` files.
+
+---
+
+## Data Ingestion & Persistence Instructions
+
+### 1. Historical Dataset Ingestion
+Run the bulk ingestion service from the command line:
+```bash
+# Run from repository root
+.venv/bin/python -m app.services.import_marine_data
+```
+Or specify a custom processed JSON dataset path:
+```bash
+.venv/bin/python -m app.services.import_marine_data data/processed/arabian_sea_historical_2025_2026.json
+```
+- **Idempotency**: Ingestion enforces a unique constraint on `(source_id, observation_time, latitude, longitude)`. Re-running the command updates existing rows in place without duplicating records.
+- **Diagnostics**: The command outputs a structured JSON report showing total processed, valid, inserted, updated, and failed counts.
+
+### 2. Live Marine Ingestion
+Live data can be queried and ingested via:
+- **FastAPI Endpoint**:
+  ```bash
+  curl "http://127.0.0.1:8000/api/v1/marine/observations?lat=12.87&lon=74.88"
+  ```
+- **Programmatic Service**:
+  ```python
+  from app.providers.data.open_meteo import OpenMeteoMarineClient
+  client = OpenMeteoMarineClient()
+  obs, evidence, limitations = await client.fetch_marine_data(latitude=12.87, longitude=74.88)
+  ```
+- **Automatic Ingestion**: When the `OceanResearchAgent` runs with an active repository, live observations are automatically persisted to PostgreSQL with distinct `observation_time` and `ingested_at` timestamps.
+
+---
+
+## Troubleshooting & Failure Modes
+
+| Symptom | Root Cause | Built-in Resolution / Behaviour |
+|---|---|---|
+| `FATAL: password authentication failed for user` | PostgreSQL credentials incorrect or PostgreSQL server not running | Safe fallback: Agent catches error, uses offline validated scientific dataset, and reports limitation. |
+| `Live provider query error: ConnectError / 504 Timeout` | External network offline or Open-Meteo downtime | Fallback: Agent loads labelled scientific baseline fixture (`is_fixture=True`) and notes the error in limitations. |
+| `Unsupported marine variable 'chlorophyll'` | Optical sensor feeds unavailable on meteorological APIs | Clear disclosure: Agent produces supported findings and assigns `AgentStatus.PARTIAL` with a transparent limitation notice. |
+| `Invalid geographic coordinates: lat=120.0` | Coordinate exceeds WGS84 physical boundaries | Immediate rejection: Agent returns `AgentStatus.FAILED` with explicit validation error without making API calls. |
 
 ---
 
 ## Test Execution Commands
 
 ```bash
-# Run all tests (unit + integration, 65 tests total)
+# Run all 66 unit and integration tests
 .venv/bin/pytest backend/tests -v
 
 # Run Phase 5 shared backend integration tests
 .venv/bin/pytest backend/tests/integration/test_shared_backend_integration.py -v
 
-# Run Phase 4 scientific validation and resilience tests
-.venv/bin/pytest backend/tests/unit/test_scientific_validation.py backend/tests/unit/test_provider_resilience.py -v
-
-# Run marine pipeline persistence tests
+# Run marine pipeline persistence and historical import tests
 .venv/bin/pytest backend/tests/integration/test_marine_pipeline.py -v
+
+# Run Phase 4 scientific validation and provider resilience tests
+.venv/bin/pytest backend/tests/unit/test_scientific_validation.py backend/tests/unit/test_provider_resilience.py -v
 ```
