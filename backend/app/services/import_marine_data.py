@@ -10,8 +10,9 @@ from app.providers.data.historical_marine import HistoricalMarineDataLoader
 
 async def import_historical_marine_data(dataset_path: str | None = None) -> dict[str, Any]:
     """
-    Executes idempotent bulk ingestion of the validated historical marine scientific dataset
+    Executes idempotent bulk ingestion of the offline sample reference fixture
     into the shared PostgreSQL database via MarineRepository.
+    Records carry is_sample_fixture=True and are excluded from normal production queries.
     """
     loader = HistoricalMarineDataLoader(default_data_path=dataset_path)
     records, evidence, counts = loader.load_local_dataset()
@@ -110,6 +111,10 @@ async def import_marine_archive_data(
             "error": str(e),
             "status": "failed",
         }
+
+
+# Explicit alias separating fixture/demo ingestion from genuine reanalysis
+import_sample_fixture_data = import_historical_marine_data
 
 
 def main():

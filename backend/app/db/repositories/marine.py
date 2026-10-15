@@ -60,14 +60,22 @@ class MarineRepository:
         wind_direction_degrees: float | None = None,
         chlorophyll_mg_m3: float | None = None,
         metadata_json: dict | None = None,
+        **extra_kwargs: Any,
     ) -> Tuple_Result:
         """
         Idempotent insert or update based on (source_id, observation_time, latitude, longitude).
         Preserves existing valid fields when incoming data is partial.
+        Any extra keyword arguments (e.g. forecast_run_time) are merged into metadata_json.
         """
         # Ensure UTC timezone
         if observation_time.tzinfo is None:
             observation_time = observation_time.replace(tzinfo=UTC)
+
+        effective_meta = dict(metadata_json or {})
+        for k, v in extra_kwargs.items():
+            if k not in effective_meta and k != "id":
+                effective_meta[k] = v.isoformat() if isinstance(v, datetime) else v
+        metadata_json = effective_meta
 
         stmt = select(MarineObservation).where(
             and_(

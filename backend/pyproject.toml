@@ -39,6 +39,7 @@ include = ["app*"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m 'not live_api'"
 markers = [
     "live_api: marks tests requiring external live network access (deselect with '-m \"not live_api\"')",
 ]

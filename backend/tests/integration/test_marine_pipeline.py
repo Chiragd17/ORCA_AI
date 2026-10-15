@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
+from unittest.mock import patch
 
+import httpx
 import pytest
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -11,6 +13,10 @@ from app.db.repositories.marine import MarineRepository
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
 from app.schemas.evidence import FindingCategory
 from app.schemas.investigations import WorkspaceType
+from tests.integration.test_shared_backend_integration import (
+    make_genuine_historical_records,
+    make_mock_marine_payload,
+)
 
 
 @pytest.fixture
@@ -160,34 +166,34 @@ async def test_marine_repository_spatial_filtering(in_memory_db: AsyncSession):
 @pytest.mark.asyncio
 async def test_ocean_research_agent_with_persisted_repository(in_memory_db: AsyncSession):
     repo = MarineRepository(in_memory_db)
-    loader = HistoricalMarineDataLoader()
-    records, evidence, _ = loader.load_local_dataset()
-
     await repo.ensure_data_source(
-        source_id="historical_archive",
-        name=evidence.source_name,
-        base_url=evidence.source_uri,
+        source_id="open_meteo_marine_archive",
+        name="Open-Meteo Marine Historical Archive",
+        base_url="https://marine-api.open-meteo.com/v1/marine",
     )
+    records = make_genuine_historical_records(lat=12.87, lon=74.88)
     await repo.bulk_ingest(records)
 
-    # Instantiate agent injected with persisted database repository
-    agent = OceanResearchAgent(marine_repository=repo)
-    task = InvestigationTask(
-        investigation_id="task-persisted-repo-01",
-        workspace=WorkspaceType.MARINE_MONITORING,
-        prompt="Analyze historical sea state and compare Southwest Monsoon waves against Post-Monsoon baseline",
-        latitude=12.87,
-        longitude=74.88,
-    )
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        # Instantiate agent injected with persisted database repository
+        agent = OceanResearchAgent(marine_repository=repo)
+        task = InvestigationTask(
+            investigation_id="task-persisted-repo-01",
+            workspace=WorkspaceType.MARINE_MONITORING,
+            prompt="Analyze historical sea state and compare Southwest Monsoon waves against Post-Monsoon baseline",
+            latitude=12.87,
+            longitude=74.88,
+        )
 
-    result = await agent.run(task)
-    assert result.agent_id == "ocean_research"
-    assert result.status == AgentStatus.COMPLETED
-    assert len(result.findings) >= 2
+        result = await agent.run(task)
+        assert result.agent_id == "ocean_research"
+        assert result.status == AgentStatus.COMPLETED
+        assert len(result.findings) >= 2
 
-    # Verify deterministic calculation from database records
-    comp_findings = [f for f in result.findings if f.category == FindingCategory.DETERMINISTIC_CALCULATION]
-    assert len(comp_findings) > 0
+        # Verify deterministic calculation from database records
+        comp_findings = [f for f in result.findings if f.category == FindingCategory.DETERMINISTIC_CALCULATION]
+        assert len(comp_findings) > 0
 
 @pytest.mark.asyncio
 async def test_marine_repository_record_versioning_update(in_memory_db: AsyncSession):
@@ -529,25 +535,30 @@ def _is_postgres_env_available() -> bool:
 async def test_postgresql_real_db_foreign_key_and_uniqueness():
     """
     Test suite for genuine PostgreSQL database operations when configured.
-    Verifies actual PostgreSQL UNIQUE constraint enforcement and Foreign Key error handling.
+    Verifies actual PostgreSQL UNIQUE constraint enforcement, foreign key constraints,
+    database-level uniqueness conflicts, repository upsert behavior, and session rollback recovery.
     """
+    import uuid
+
     from sqlalchemy.exc import IntegrityError
 
     from app.db.base import Base
     from app.db.session import async_session_maker, engine
+    from app.models.marine import MarineObservation
 
-    # Create approved tables on the actual PostgreSQL instance if not present
+    # 1. Create or apply approved tables on the actual PostgreSQL instance if not present
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     async with async_session_maker() as session:
         repo = MarineRepository(session)
         source_id = "real_pg_verified_source"
+        # 2. Register a valid source
         await repo.ensure_data_source(source_id, "Real PostgreSQL Verified Source")
 
         t_obs = datetime(2026, 10, 15, 8, 0, tzinfo=UTC)
 
-        # 1. Insert valid observation
+        # 3. Insert and query a valid record
         rec_valid = {
             "source_id": source_id,
             "observation_time": t_obs,
@@ -556,11 +567,17 @@ async def test_postgresql_real_db_foreign_key_and_uniqueness():
             "sea_surface_temperature_celsius": 29.1,
             "wave_height_meters": 1.7,
         }
-        upserted = await repo.upsert_observation(rec_valid)
+        action, upserted = await repo.upsert_observation(**rec_valid)
+        assert action == "inserted"
         assert upserted.id is not None
         assert upserted.wave_height_meters == 1.7
+        await session.commit()
 
-        # 2. Reject record with unknown source_id (foreign key violation)
+        queried = await repo.query_observations(13.0, 74.5, radius_km=10.0)
+        matching_initial = [o for o in queried if o.source_id == source_id and o.observation_time == t_obs]
+        assert len(matching_initial) == 1
+
+        # 4. Reject an unknown foreign-key source
         rec_invalid_fk = {
             "source_id": "non_existent_source_id_9999",
             "observation_time": t_obs,
@@ -570,9 +587,27 @@ async def test_postgresql_real_db_foreign_key_and_uniqueness():
         }
         with pytest.raises(IntegrityError):
             async with session.begin_nested():
-                await repo.upsert_observation(rec_invalid_fk)
+                await repo.upsert_observation(**rec_invalid_fk)
 
-        # 3. Verify unique constraint & upsert: updating the same valid entity
+        # 5. Demonstrate database-level uniqueness by attempting a direct duplicate INSERT
+        dup_direct = MarineObservation(
+            id=f"obs-dup-{uuid.uuid4().hex[:8]}",
+            source_id=source_id,
+            observation_time=t_obs,
+            latitude=13.0,
+            longitude=74.5,
+            wave_height_meters=2.0,
+            created_at=datetime.now(UTC),
+        )
+        session.add(dup_direct)
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                await session.flush()
+
+        # 7. Verify session rollback / recovery after an integrity error
+        await session.rollback()
+
+        # 6. Test the intended repository upsert and repeat-ingestion behavior separately
         rec_update = {
             "source_id": source_id,
             "observation_time": t_obs,
@@ -580,12 +615,16 @@ async def test_postgresql_real_db_foreign_key_and_uniqueness():
             "longitude": 74.5,
             "sea_surface_temperature_celsius": 29.4,
             "wave_height_meters": 1.85,  # calibrated value
-            "forecast_run_time": datetime(2026, 10, 15, 6, 0, tzinfo=UTC),
+            "metadata_json": {
+                "forecast_run_time": datetime(2026, 10, 15, 6, 0, tzinfo=UTC).isoformat(),
+            },
         }
-        refreshed = await repo.upsert_observation(rec_update)
+        action_up, refreshed = await repo.upsert_observation(**rec_update)
+        assert action_up == "updated"
         assert refreshed.id == upserted.id
         assert refreshed.wave_height_meters == 1.85
         assert refreshed.sea_surface_temperature_celsius == 29.4
+        await session.commit()
 
         # Verify only 1 record exists at this point
         all_obs = await repo.query_observations(13.0, 74.5, radius_km=10.0)

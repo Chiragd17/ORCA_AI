@@ -46,6 +46,28 @@ VARIABLE_UNITS: dict[str, str] = {
     "wind_direction_degrees": "degrees",
 }
 
+def is_fixture_record(record: Any) -> bool:
+    """
+    Determines whether an observation record (dict or ORM model) originates from
+    a demo fixture or sample baseline rather than authentic scientific data.
+    """
+    if isinstance(record, dict):
+        meta = record.get("metadata_json") or {}
+        src = record.get("source_id", "")
+    else:
+        meta = getattr(record, "metadata_json", {}) or {}
+        src = getattr(record, "source_id", "")
+
+    return bool(
+        meta.get("is_sample_fixture")
+        or meta.get("is_fixture")
+        or meta.get("is_demo")
+        or meta.get("data_nature") in ("sample_reference_fixture", "sample_fixture")
+        or meta.get("scientific_baseline_suitable") is False
+        or src in ("sample_fixture_source", "scientific_fixture")
+    )
+
+
 class MarineResearchQueryService:
     """
     Query service executing marine research queries against either:
@@ -134,7 +156,6 @@ class MarineResearchQueryService:
                         continue
                 filtered.append(r)
         return filtered
-
     async def get_observations(
         self,
         latitude: float,
@@ -143,17 +164,31 @@ class MarineResearchQueryService:
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         allow_fixture_fallback: bool = False,
+        query_nature: str = "all",
     ) -> tuple[list[dict[str, Any]], str]:
         """
         Retrieves observation records for a given geographic point and radius.
+        Normal production analysis (allow_fixture_fallback=False) strictly excludes fixture records
+        even if persisted in the database, and never falls back implicitly to local fixtures.
+
+        Args:
+            latitude: Target latitude in WGS84.
+            longitude: Target longitude in WGS84.
+            radius_km: Search radius in kilometers.
+            start_time: Optional lower temporal bound.
+            end_time: Optional upper temporal bound.
+            allow_fixture_fallback: If True, allows explicit demo/test fixture use when real data is unavailable.
+            query_nature: 'historical' (caps at now_utc, excludes future forecasts), 'forecast', or 'all'.
+
         Returns:
             (records, source_type) where source_type is:
-            - 'database_repository': records from real database
-            - 'database_empty': database exists and was queried, but 0 records matched
+            - 'database_repository': genuine records from real database
+            - 'database_empty': database exists and was queried, but 0 qualifying records matched
             - 'database_error': database query failed with an exception
             - 'no_repository_configured': no repository configured
             - 'sample_fixture_demo': explicitly requested or allowed demo/test fixture
         """
+        now_utc = datetime.now(UTC)
         if self.repository:
             try:
                 db_records = await self.repository.query_observations(
@@ -164,26 +199,59 @@ class MarineResearchQueryService:
                     end_time=end_time,
                 )
                 if db_records:
-                    normalized = []
-                    for obs in db_records:
-                        normalized.append({
-                            "id": obs.id,
-                            "source_id": obs.source_id,
-                            "observation_time": obs.observation_time,
-                            "latitude": obs.latitude,
-                            "longitude": obs.longitude,
-                            "sea_surface_temperature_celsius": obs.sea_surface_temperature_celsius,
-                            "wave_height_meters": obs.wave_height_meters,
-                            "wave_period_seconds": obs.wave_period_seconds,
-                            "wave_direction_degrees": obs.wave_direction_degrees,
-                            "ocean_current_velocity_mps": getattr(obs, "ocean_current_velocity_mps", None),
-                            "ocean_current_direction_degrees": getattr(obs, "ocean_current_direction_degrees", None),
-                            "wind_speed_knots": obs.wind_speed_knots,
-                            "wind_direction_degrees": obs.wind_direction_degrees,
-                            "chlorophyll_mg_m3": obs.chlorophyll_mg_m3,
-                            "metadata_json": obs.metadata_json or {},
-                        })
-                    return normalized, "database_repository"
+                    # In normal production mode, fixtures are NEVER included
+                    genuine_db = [r for r in db_records if not is_fixture_record(r)]
+                    candidates = db_records if allow_fixture_fallback else genuine_db
+
+                    # Filter by query_nature
+                    if query_nature == "historical":
+                        qualifying = [
+                            r for r in candidates
+                            if (r.observation_time.replace(tzinfo=UTC) if r.observation_time.tzinfo is None else r.observation_time) <= now_utc
+                            and (r.metadata_json or {}).get("data_nature") != "numerical_model_forecast"
+                        ]
+                    elif query_nature == "forecast":
+                        qualifying = [
+                            r for r in candidates
+                            if (r.metadata_json or {}).get("data_nature") == "numerical_model_forecast"
+                        ]
+                    else:
+                        qualifying = candidates
+
+                    if qualifying:
+                        normalized = []
+                        for obs in qualifying:
+                            normalized.append({
+                                "id": obs.id,
+                                "source_id": obs.source_id,
+                                "observation_time": obs.observation_time,
+                                "latitude": obs.latitude,
+                                "longitude": obs.longitude,
+                                "sea_surface_temperature_celsius": obs.sea_surface_temperature_celsius,
+                                "wave_height_meters": obs.wave_height_meters,
+                                "wave_period_seconds": obs.wave_period_seconds,
+                                "wave_direction_degrees": obs.wave_direction_degrees,
+                                "ocean_current_velocity_mps": getattr(obs, "ocean_current_velocity_mps", None),
+                                "ocean_current_direction_degrees": getattr(obs, "ocean_current_direction_degrees", None),
+                                "wind_speed_knots": obs.wind_speed_knots,
+                                "wind_direction_degrees": obs.wind_direction_degrees,
+                                "chlorophyll_mg_m3": obs.chlorophyll_mg_m3,
+                                "metadata_json": obs.metadata_json or {},
+                            })
+                        if all(is_fixture_record(r) for r in qualifying):
+                            return normalized, "sample_fixture_demo"
+                        return normalized, "database_repository"
+                    else:
+                        if allow_fixture_fallback:
+                            fallback = self._filter_historical_records(
+                                latitude=latitude,
+                                longitude=longitude,
+                                radius_km=radius_km,
+                                start_time=start_time,
+                                end_time=end_time,
+                            )
+                            return fallback, "sample_fixture_demo"
+                        return [], "database_empty"
                 else:
                     if allow_fixture_fallback:
                         fallback = self._filter_historical_records(

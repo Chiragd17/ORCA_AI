@@ -3,9 +3,10 @@
 ORCA Marine Data Ingestion CLI (Person 1 Ownership).
 Idempotently fetches, validates, and persists marine observations into PostgreSQL.
 Supports:
-    --live           : Fetch numerical model wave/current forecasts from Open-Meteo Marine API
-    --historical     : Ingest curated seasonal baseline reference sample fixture
-    --use-fixture    : Ingest offline baseline fixture
+    --historical     : Ingest genuine historical oceanographic reanalysis/hindcast from Open-Meteo Marine Archive
+                       (Requires --start-date YYYY-MM-DD and --end-date YYYY-MM-DD)
+    --sample-fixture : Ingest offline local 23-record reference sample fixture (Labelled DEMO DATA)
+    --live           : Ingest near-real-time numerical model wave/current forecast from Open-Meteo Marine API
 """
 import argparse
 import asyncio
@@ -19,25 +20,59 @@ from app.db.repositories.marine import MarineRepository
 from app.db.session import AsyncSessionLocal
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
 from app.providers.data.open_meteo import OpenMeteoMarineClient
+from app.services.import_marine_data import import_marine_archive_data
 
 
-async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str | None = None):
+async def run_ingestion(
+    lat: float,
+    lon: float,
+    mode: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    custom_file: str | None = None,
+):
     print("=" * 70)
     print("ORCA Marine Data Foundation — Ingestion Pipeline")
     print(f"Target Coordinates : {lat:.4f}°N, {lon:.4f}°E (WGS84)")
     print(f"Selected Mode      : {mode.upper()}")
     print("=" * 70)
 
+    if mode == "historical":
+        if not start_date or not end_date:
+            print("[Error] Real historical marine ingestion requires --start-date and --end-date (YYYY-MM-DD).")
+            print("To ingest the offline demonstration fixture instead, use --sample-fixture.")
+            sys.exit(1)
+
+        print(f"Fetching genuine historical marine archive for {start_date} to {end_date}...")
+        result = await import_marine_archive_data(
+            latitude=lat,
+            longitude=lon,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        print("-" * 70)
+        print("Historical Marine Reanalysis Ingestion Report:")
+        for k, v in result.items():
+            print(f"  • {k}: {v}")
+        print("-" * 70)
+        if result.get("status") == "success":
+            print("✓ Genuine historical reanalysis ingested successfully.")
+        else:
+            print(f"[Warning/Failure] Ingestion did not succeed: {result.get('error') or result.get('status')}")
+        return
+
     records = []
     source_id = "open_meteo"
     source_name = "Open-Meteo Marine API"
     evidence_id = None
 
-    if mode == "historical":
+    if mode == "fixture":
+        print("[SAMPLE FIXTURE / DEMO DATA] Ingesting offline local reference sample fixture.")
+        print("NOTE: This dataset represents demonstration data, NOT genuine historical observations or reanalysis.")
         loader = HistoricalMarineDataLoader(custom_file)
-        print(f"Loading historical dataset from: {loader.data_path}")
+        print(f"Loading sample fixture from: {loader.data_path}")
         validated_records, evidence, parse_counts = loader.load_local_dataset()
-        print("Dataset Validation Summary:")
+        print("Fixture Validation Summary:")
         print(f"  • Total Read   : {parse_counts['processed']}")
         print(f"  • Valid Format : {parse_counts['valid']}")
         print(f"  • Rejected     : {parse_counts['rejected']}")
@@ -45,29 +80,6 @@ async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str | No
         source_id = "historical_archive"
         source_name = evidence.source_name
         evidence_id = evidence.id
-
-    elif mode == "fixture":
-        client = OpenMeteoMarineClient()
-        obs, ev_list = client._load_scientific_fixture(lat, lon)
-        print(f"Loaded {len(obs)} records from scientific baseline fixture.")
-        source_id = "scientific_fixture"
-        source_name = "Arabian Sea Scientific Baseline (Labelled Fixture)"
-        evidence_id = ev_list[0].id if ev_list else None
-        for p in obs:
-            records.append({
-                "source_id": source_id,
-                "observation_time": p.time,
-                "latitude": p.latitude,
-                "longitude": p.longitude,
-                "sea_surface_temperature_celsius": p.sea_surface_temperature_celsius,
-                "wave_height_meters": p.wave_height_meters,
-                "wave_period_seconds": p.wave_period_seconds,
-                "wave_direction_degrees": p.wave_direction_degrees,
-                "wind_speed_knots": p.wind_speed_knots,
-                "wind_direction_degrees": p.wind_direction_degrees,
-                "chlorophyll_mg_m3": p.chlorophyll_mg_m3,
-                "metadata_json": {"is_fixture": True, "evidence_id": evidence_id},
-            })
 
     else:  # live
         client = OpenMeteoMarineClient()
@@ -88,10 +100,16 @@ async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str | No
                 "wave_height_meters": p.wave_height_meters,
                 "wave_period_seconds": p.wave_period_seconds,
                 "wave_direction_degrees": p.wave_direction_degrees,
+                "ocean_current_velocity_mps": p.ocean_current_velocity_mps,
+                "ocean_current_direction_degrees": p.ocean_current_direction_degrees,
                 "wind_speed_knots": p.wind_speed_knots,
                 "wind_direction_degrees": p.wind_direction_degrees,
                 "chlorophyll_mg_m3": p.chlorophyll_mg_m3,
-                "metadata_json": {"status": "live_query", "evidence_id": evidence_id},
+                "metadata_json": {
+                    "data_nature": "numerical_model_forecast",
+                    "status": "live_query",
+                    "evidence_id": evidence_id,
+                },
             })
 
     if not records:
@@ -122,13 +140,27 @@ async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str | No
         print(f"\n[PostgreSQL Status] Database write unavailable ({e}).")
         print("Pipeline verified in decoupled/offline mode.")
 
+
 def main():
     parser = argparse.ArgumentParser(description="ORCA Marine Data Ingestion Tool")
     parser.add_argument("--lat", type=float, default=12.87, help="Latitude in WGS84 (default: 12.87 Mangaluru)")
     parser.add_argument("--lon", type=float, default=74.88, help="Longitude in WGS84 (default: 74.88)")
-    parser.add_argument("--historical", action="store_true", help="Ingest multi-season historical dataset")
-    parser.add_argument("--use-fixture", action="store_true", help="Ingest baseline fixture")
-    parser.add_argument("--file", type=str, default=None, help="Custom historical dataset JSON path")
+    parser.add_argument(
+        "--historical",
+        action="store_true",
+        help="Ingest genuine historical reanalysis from Open-Meteo Marine Archive (requires --start-date and --end-date)",
+    )
+    parser.add_argument(
+        "--sample-fixture",
+        "--fixture",
+        dest="use_fixture",
+        action="store_true",
+        help="Ingest offline 23-record reference sample fixture (DEMO DATA only)",
+    )
+    parser.add_argument("--live", action="store_true", help="Fetch and ingest live numerical model forecast")
+    parser.add_argument("--start-date", type=str, default=None, help="Start date (YYYY-MM-DD) for historical archive")
+    parser.add_argument("--end-date", type=str, default=None, help="End date (YYYY-MM-DD) for historical archive")
+    parser.add_argument("--file", type=str, default=None, help="Custom historical sample dataset JSON path")
 
     args = parser.parse_args()
     if args.historical:
@@ -138,7 +170,17 @@ def main():
     else:
         mode = "live"
 
-    asyncio.run(run_ingestion(args.lat, args.lon, mode, args.file))
+    asyncio.run(
+        run_ingestion(
+            lat=args.lat,
+            lon=args.lon,
+            mode=mode,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            custom_file=args.file,
+        )
+    )
+
 
 if __name__ == "__main__":
     main()

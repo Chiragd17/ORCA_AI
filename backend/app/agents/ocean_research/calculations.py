@@ -404,6 +404,13 @@ def compare_locations(
     med_b = stats_b["median"]
     med_diff = round(med_b - med_a, 2) if med_a is not None and med_b is not None else None
 
+    if diff > 0:
+        direction = "higher"
+    elif diff < 0:
+        direction = "lower"
+    else:
+        direction = "identical"
+
     return {
         "valid_comparison": True,
         "variable": variable_name,
@@ -413,6 +420,7 @@ def compare_locations(
         "mean_difference": diff,
         "median_difference": med_diff,
         "percentage_difference": pct_diff,
+        "direction": direction,
         "method": "Deterministic two-location spatial comparison.",
     }
 

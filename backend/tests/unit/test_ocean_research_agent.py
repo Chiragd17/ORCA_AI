@@ -26,6 +26,7 @@ from app.providers.data.open_meteo import OpenMeteoMarineClient, to_utc_datetime
 from app.providers.llm.base import BaseLLMProvider
 from app.schemas.evidence import FindingCategory, VerificationStatus
 from app.schemas.investigations import WorkspaceType
+from app.utils import haversine_distance_km
 
 # -----------------------------------------------------------------------------
 # 1. Query Parameter & Variable Validation Tests
@@ -836,8 +837,172 @@ def test_anomaly_detection_distinct_period_identities():
     assert res_same["eligible"] is False
     assert "Anomaly detection requires separate" in res_same["limitation"]
 
+
 # -----------------------------------------------------------------------------
-# 17. Live External API Smoke Test (Explicit Group)
+# 17. Time-Window Exact-Time & Precedence Regression Tests
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_uncovered_target_time_does_not_substitute_full_forecast():
+    """
+    Verifies that when a target time differs from the nearest available forecast hour
+    by more than the 3600-second tolerance, NO forecast findings are produced,
+    an explicit limitation is recorded, and the full forecast summary is NEVER substituted.
+    """
+    start_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    # Available forecast hours in payload will be start_dt, start_dt + 1h, ...
+    # Set target_dt to be 30 minutes between hours (e.g. 1800s diff, which is within 3600s),
+    # but for an uncovered target, choose a target that falls between hours with > 3600s gap
+    # or a sparse payload.
+    # More directly: target_time is exactly 2 hours after the end of the 24-hour payload (diff = 7200s).
+    target_dt = start_dt + timedelta(hours=26)
+    # Payload has 24 hours (hours 0 to 23). Nearest hour is hour 23 (diff = 3 hours = 10800s > 3600s).
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(start_dt=start_dt, hours=24), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent()
+        task = InvestigationTask(
+            investigation_id="task-uncovered-target",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt="Check offshore wave conditions at uncovered target time",
+            latitude=12.87,
+            longitude=74.88,
+            target_time=target_dt,
+        )
+        result = await agent.run(task)
+        # Must NOT return full forecast findings
+        forecast_findings = [f for f in result.findings if f.category == FindingCategory.FORECAST]
+        assert len(forecast_findings) == 0
+        assert any("exceeding tolerance of 3600s" in lim for lim in result.limitations)
+        assert any("Full forecast summary was not substituted" in lim for lim in result.limitations)
+
+
+@pytest.mark.asyncio
+async def test_exact_target_time_precedence_over_target_date():
+    """
+    Verifies strict precedence: when both target_time (exact hour) and target_date (day window)
+    are supplied in a task, target_time takes precedence and selects the single valid hour.
+    """
+    start_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    target_hour = start_dt + timedelta(hours=6)
+    target_day_str = (start_dt + timedelta(days=2)).strftime("%Y-%m-%d")
+
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(start_dt=start_dt, hours=72), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent()
+        task = InvestigationTask(
+            investigation_id="task-precedence-exact-time",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt="Evaluate sea conditions with conflicting target_time and target_date",
+            latitude=12.87,
+            longitude=74.88,
+            target_time=target_hour,
+            context={"target_date": target_day_str},
+        )
+        result = await agent.run(task)
+        fcst_findings = [f for f in result.findings if f.category == FindingCategory.FORECAST]
+        assert len(fcst_findings) > 0
+        # The finding claim should reference the exact valid hour (Precedence 1), NOT the 24 hours of target_date
+        assert any(target_hour.strftime("%Y-%m-%d %H:00 UTC") in f.claim for f in fcst_findings)
+        assert any("1 forecast hour" in f.claim for f in fcst_findings)
+
+
+@pytest.mark.asyncio
+async def test_independent_start_and_end_time_forecast_filtering():
+    """
+    Verifies that start_time and end_time work independently to bound forecast queries.
+    """
+    start_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(start_dt=start_dt, hours=48), request=httpx.Request("GET", "https://test.local"))
+
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent()
+
+        # 1. Independent start_time only: hours from start_dt + 24h onwards
+        task_start_only = InvestigationTask(
+            investigation_id="task-bound-start",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt="Wave forecast from tomorrow onwards",
+            latitude=12.87,
+            longitude=74.88,
+            context={"start_time": start_dt + timedelta(hours=24)},
+        )
+        res_start = await agent.run(task_start_only)
+        findings_start = [f for f in res_start.findings if f.category == FindingCategory.FORECAST]
+        assert len(findings_start) > 0
+        assert any(f"from {(start_dt + timedelta(hours=24)).strftime('%Y-%m-%d %H:%M UTC')}" in f.claim for f in findings_start)
+
+        # 2. Independent end_time only: hours up to start_dt + 12h
+        task_end_only = InvestigationTask(
+            investigation_id="task-bound-end",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt="Wave forecast up to 12 hours from now",
+            latitude=12.87,
+            longitude=74.88,
+            context={"end_time": start_dt + timedelta(hours=12)},
+        )
+        res_end = await agent.run(task_end_only)
+        findings_end = [f for f in res_end.findings if f.category == FindingCategory.FORECAST]
+        assert len(findings_end) > 0
+        assert any(f"to {(start_dt + timedelta(hours=12)).strftime('%Y-%m-%d %H:%M UTC')}" in f.claim for f in findings_end)
+
+
+def test_spatial_series_high_latitude_and_longitude_wrapping():
+    """
+    Verifies spatial calculations and haversine distance across the antimeridian
+    (longitude wrapping between 179°E and -179°W) and at high latitudes.
+    """
+    # Points across the antimeridian at 10°N
+    lat = 10.0
+    lon_east = 179.9
+    lon_west = -179.9
+
+    # Distance across the 180th meridian (0.2 degrees longitude apart at 10°N)
+    dist = haversine_distance_km(lat, lon_east, lat, lon_west)
+    # 0.2 deg at 10°N is roughly ~22 km, NOT ~39,000 km around the other side
+    assert 20.0 < dist < 25.0
+
+    # High latitude coordinate validation
+    valid_high, err_high = validate_geographic_coordinates(85.0, 0.0)
+    assert valid_high is True
+
+    # Pole boundary
+    valid_pole, _ = validate_geographic_coordinates(90.0, 0.0)
+    assert valid_pole is True
+
+    # Beyond pole
+    invalid_pole, err_pole = validate_geographic_coordinates(91.0, 0.0)
+    assert invalid_pole is False
+    assert "Latitude 91.0 out of bounds" in err_pole
+
+
+@pytest.mark.asyncio
+async def test_cli_historical_importer_vs_sample_fixture_separation():
+    """
+    Verifies that the CLI explicitly separates genuine historical ingestion from sample fixture ingestion:
+    - --historical without start/end dates immediately aborts with SystemExit(1)
+    - --sample-fixture explicitly loads sample fixture records with is_sample_fixture=True
+    """
+    import os
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../scripts")))
+    from import_marine_data import run_ingestion
+
+    # 1. Real historical ingestion without required dates must abort
+    with pytest.raises(SystemExit) as exc_info:
+        await run_ingestion(lat=12.87, lon=74.88, mode="historical", start_date=None, end_date=None)
+    assert exc_info.value.code == 1
+
+    # 2. Sample fixture loader explicitly tags records with is_sample_fixture=True
+    loader = HistoricalMarineDataLoader()
+    records, evidence, parse_counts = loader.load_local_dataset()
+    assert parse_counts["processed"] > 0
+    assert evidence.metadata.get("is_sample_fixture") is True
+    assert evidence.metadata.get("scientific_baseline_suitable") is False
+    assert all(r.get("metadata_json", {}).get("is_sample_fixture") is True for r in records)
+
+
+# -----------------------------------------------------------------------------
+# 18. Live External API Smoke Test (Explicit Group)
 # -----------------------------------------------------------------------------
 
 @pytest.mark.live_api
