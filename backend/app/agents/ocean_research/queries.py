@@ -100,6 +100,34 @@ class MarineResearchQueryService:
 
         return len(errors) == 0, errors
 
+    def _filter_historical_records(
+        self,
+        latitude: float,
+        longitude: float,
+        radius_km: float = 50.0,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Filters local historical dataset by spatial radius and temporal window."""
+        all_hist, _, _ = self.historical_loader.load_local_dataset()
+        filtered = []
+        for r in all_hist:
+            r_lat = r["latitude"]
+            r_lon = r["longitude"]
+            dist_km = haversine_distance_km(latitude, longitude, r_lat, r_lon)
+            if dist_km <= radius_km:
+                obs_t = r["observation_time"]
+                if start_time:
+                    st = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
+                    if obs_t < st:
+                        continue
+                if end_time:
+                    et = end_time if end_time.tzinfo else end_time.replace(tzinfo=timezone.utc)
+                    if obs_t > et:
+                        continue
+                filtered.append(r)
+        return filtered
+
     async def get_observations(
         self,
         latitude: float,
@@ -110,7 +138,9 @@ class MarineResearchQueryService:
     ) -> Tuple[List[Dict[str, Any]], str]:
         """
         Retrieves observation records for a given geographic point and radius.
-        Returns (records, source_type).
+        Returns:
+            (records, source_type) where source_type is 'database_repository',
+            'database_fallback', or 'historical_dataset'.
         """
         if self.repository:
             try:
@@ -141,25 +171,22 @@ class MarineResearchQueryService:
                         })
                     return normalized, "database_repository"
             except Exception:
-                pass  # Fall back to loaded dataset if DB is unreachable or empty
+                # Disclose repository query failure and fall back safely to local historical scientific archive
+                fallback = self._filter_historical_records(
+                    latitude=latitude,
+                    longitude=longitude,
+                    radius_km=radius_km,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+                return fallback, "database_fallback"
 
         # Fallback to local historical scientific dataset
-        all_hist, _, _ = self.historical_loader.load_local_dataset()
-        filtered = []
-        for r in all_hist:
-            r_lat = r["latitude"]
-            r_lon = r["longitude"]
-            dist_km = haversine_distance_km(latitude, longitude, r_lat, r_lon)
-            if dist_km <= radius_km:
-                obs_t = r["observation_time"]
-                if start_time:
-                    st = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
-                    if obs_t < st:
-                        continue
-                if end_time:
-                    et = end_time if end_time.tzinfo else end_time.replace(tzinfo=timezone.utc)
-                    if obs_t > et:
-                        continue
-                filtered.append(r)
-
+        filtered = self._filter_historical_records(
+            latitude=latitude,
+            longitude=longitude,
+            radius_km=radius_km,
+            start_time=start_time,
+            end_time=end_time,
+        )
         return filtered, "historical_dataset"

@@ -62,11 +62,29 @@ class OceanResearchAgent(BaseAgent):
         else:
             self.llm_provider = None
 
+    def set_repository(self, repository: MarineRepository) -> None:
+        """Injects or updates the shared MarineRepository instance."""
+        self.marine_repository = repository
+        self.query_service.repository = repository
+
     async def run(self, task: InvestigationTask) -> AgentResult:
         findings: List[Finding] = []
         evidence_records: List[EvidenceRecord] = []
         limitations: List[str] = []
         errors: List[str] = []
+
+        # Resolve effective query service (supporting repository or session injected via task context)
+        effective_query_service = self.query_service
+        if "repository" in task.context and isinstance(task.context["repository"], MarineRepository):
+            effective_query_service = MarineResearchQueryService(
+                repository=task.context["repository"],
+                historical_loader=self.historical_loader,
+            )
+        elif "session" in task.context:
+            effective_query_service = MarineResearchQueryService(
+                repository=MarineRepository(task.context["session"]),
+                historical_loader=self.historical_loader,
+            )
 
         # 1. Geographic Coordinate Normalization & Validation (Default: Mangaluru Offshore)
         lat = task.latitude if task.latitude is not None else 12.87
@@ -124,8 +142,12 @@ class OceanResearchAgent(BaseAgent):
                 loc_a_name = task.context.get("location_name", f"Location A ({lat:.2f}°N, {lon:.2f}°E)")
                 loc_b_name = compare_loc_name or f"Location B ({compare_lat:.2f}°N, {compare_lon:.2f}°E)"
 
-                obs_a, src_a = await self.query_service.get_observations(lat, lon, radius_km=60.0)
-                obs_b, src_b = await self.query_service.get_observations(compare_lat, compare_lon, radius_km=60.0)
+                obs_a, src_a = await effective_query_service.get_observations(lat, lon, radius_km=60.0)
+                obs_b, src_b = await effective_query_service.get_observations(compare_lat, compare_lon, radius_km=60.0)
+                if src_a == "database_fallback" or src_b == "database_fallback":
+                    limitations.append(
+                        "Database query failed during location comparison; proceeded using offline historical scientific dataset fallback."
+                    )
 
                 sst_a = [o["sea_surface_temperature_celsius"] for o in obs_a if o.get("sea_surface_temperature_celsius") is not None]
                 sst_b = [o["sea_surface_temperature_celsius"] for o in obs_b if o.get("sea_surface_temperature_celsius") is not None]
@@ -189,157 +211,184 @@ class OceanResearchAgent(BaseAgent):
 
         if is_historical_inquiry:
             try:
-                hist_records, hist_ev, parse_counts = self.historical_loader.load_local_dataset()
-                evidence_records.append(hist_ev)
-
                 # Filter historical records for target geographic proximity
-                target_hist, query_source = await self.query_service.get_observations(
+                target_hist, query_source = await effective_query_service.get_observations(
                     latitude=lat,
                     longitude=lon,
                     radius_km=100.0,
                 )
-                if not target_hist:
-                    target_hist = hist_records
 
-                # Clean & validate observations (check physical bounds & deduplicate)
-                raw_sst = [r.get("sea_surface_temperature_celsius") for r in target_hist]
-                raw_dates = [r.get("observation_time") for r in target_hist]
-                clean_sst, clean_dates, clean_issues = filter_and_clean_observations(
-                    values=raw_sst,
-                    timestamps=raw_dates,
-                    variable_name="sea_surface_temperature_celsius",
-                    deduplicate_timestamps=True,
-                )
-                limitations.extend(clean_issues)
-
-                raw_waves = [r.get("wave_height_meters") for r in target_hist]
-                clean_waves, wave_dates, wave_issues = filter_and_clean_observations(
-                    values=raw_waves,
-                    timestamps=raw_dates,
-                    variable_name="wave_height_meters",
-                    deduplicate_timestamps=True,
-                )
-                limitations.extend(wave_issues)
-
-                # Historical Time-Series Summary with Median & Temporal Gaps
-                if clean_sst:
-                    sst_stats = compute_series_stats(clean_sst, clean_dates, max_gap_hours=72.0)
-                    gap_count = len(sst_stats["sampling_gaps"])
-                    gap_info = f", with {gap_count} sampling gap(s) > 72h" if gap_count > 0 else ""
-
-                    findings.append(
-                        Finding(
-                            id=f"fnd-hist-sst-{uuid.uuid4().hex[:8]}",
-                            claim=(
-                                f"Historical sea surface temperature off Karnataka Coast averages {sst_stats['mean']} °C "
-                                f"(median: {sst_stats['median']} °C, range: {sst_stats['min']} - {sst_stats['max']} °C "
-                                f"across {sst_stats['count']} records{gap_info})."
-                            ),
-                            value=sst_stats["mean"],
-                            unit="°C",
-                            category=FindingCategory.HISTORICAL_RECORD,
-                            evidence_ids=[hist_ev.id],
-                            uncertainty="Derived from validated multi-season ERA5 / Copernicus Marine reanalysis.",
-                            verification_status=VerificationStatus.UNVERIFIED,
-                        )
+                if query_source == "database_fallback":
+                    limitations.append(
+                        "PostgreSQL repository query failed; analysis proceeded using offline historical scientific dataset fallback."
                     )
 
-                # Seasonal Breakdown Analysis
-                if len(clean_dates) >= 4 and clean_waves:
-                    seasonal = compute_seasonal_breakdown(clean_dates, clean_waves, min_observations_per_season=2)
-                    for season_name, sstats in seasonal.items():
-                        if sstats["is_adequate_coverage"] and sstats["count"] > 0:
-                            findings.append(
-                                Finding(
-                                    id=f"fnd-season-{season_name.lower().replace(' ', '-')}-{uuid.uuid4().hex[:6]}",
-                                    claim=(
-                                        f"{season_name} sea state records mean wave height of {sstats['mean']} m "
-                                        f"(median: {sstats['median']} m, max: {sstats['max']} m, count: {sstats['count']})."
-                                    ),
-                                    value=sstats["mean"],
-                                    unit="m",
-                                    category=FindingCategory.DETERMINISTIC_CALCULATION,
-                                    evidence_ids=[hist_ev.id],
-                                    uncertainty=f"Categorized via Arabian Sea meteorological seasons ({sstats['season_definition']}).",
-                                    verification_status=VerificationStatus.UNVERIFIED,
-                                )
-                            )
-                        elif not sstats["is_adequate_coverage"] and sstats["limitation"]:
-                            limitations.append(sstats["limitation"])
-
-                    # Deterministic Period Comparison: Southwest Monsoon vs. Post-Monsoon
-                    monsoon_waves = [
-                        r["wave_height_meters"] for r in target_hist
-                        if r.get("metadata_json", {}).get("season") == "Southwest Monsoon"
-                        and r.get("wave_height_meters") is not None
-                    ]
-                    post_monsoon_waves = [
-                        r["wave_height_meters"] for r in target_hist
-                        if r.get("metadata_json", {}).get("season") == "Post-Monsoon"
-                        and r.get("wave_height_meters") is not None
-                    ]
-                    if monsoon_waves and post_monsoon_waves:
-                        comp = compare_time_periods(
-                            period_a_values=post_monsoon_waves,
-                            period_b_values=monsoon_waves,
-                            variable_name="wave_height",
-                            unit="m",
-                            period_a_name="Post-Monsoon",
-                            period_b_name="Southwest Monsoon",
-                        )
-                        if comp["valid_comparison"]:
-                            findings.append(
-                                Finding(
-                                    id=f"fnd-comp-monsoon-{uuid.uuid4().hex[:8]}",
-                                    claim=(
-                                        f"Southwest Monsoon wave heights are {abs(comp['mean_difference'])} m higher "
-                                        f"(median diff: {comp['median_difference']} m, {comp['percentage_change']}% change) "
-                                        f"compared to Post-Monsoon baseline."
-                                    ),
-                                    value=comp["mean_difference"],
-                                    unit="m",
-                                    category=FindingCategory.DETERMINISTIC_CALCULATION,
-                                    evidence_ids=[hist_ev.id],
-                                    uncertainty="Deterministic delta calculated from multi-month seasonal records.",
-                                    verification_status=VerificationStatus.UNVERIFIED,
-                                )
-                            )
-
-                # Anomaly check against historical baseline
-                if len(clean_sst) >= 10:
-                    baseline_sst = clean_sst
-                    anom = detect_anomalies(clean_sst, baseline_sst, threshold_sigma=2.0, min_baseline_samples=10)
-                    if anom["eligible"]:
-                        if anom["anomaly_detected"]:
-                            findings.append(
-                                Finding(
-                                    id=f"fnd-anom-sst-{uuid.uuid4().hex[:8]}",
-                                    claim=f"Detected {anom['anomaly_count']} sea surface temperature reading(s) exceeding 2.0-sigma baseline variance.",
-                                    value=anom["anomaly_count"],
-                                    unit="occurrences",
-                                    category=FindingCategory.DETERMINISTIC_CALCULATION,
-                                    evidence_ids=[hist_ev.id],
-                                    uncertainty=f"Statistical z-score against baseline mean={anom['baseline_mean']}°C, std={anom['baseline_std_dev']}°C.",
-                                    verification_status=VerificationStatus.UNVERIFIED,
-                                )
-                            )
-                        else:
-                            findings.append(
-                                Finding(
-                                    id=f"fnd-anom-none-{uuid.uuid4().hex[:8]}",
-                                    claim=f"No thermal anomalies detected beyond 2.0-sigma threshold relative to the regional scientific baseline.",
-                                    value=0,
-                                    unit="occurrences",
-                                    category=FindingCategory.DETERMINISTIC_CALCULATION,
-                                    evidence_ids=[hist_ev.id],
-                                    uncertainty=f"Validated against {anom['baseline_sample_count']}-sample regional baseline.",
-                                    verification_status=VerificationStatus.UNVERIFIED,
-                                )
-                            )
-                    else:
-                        limitations.append(anom["limitation"])
+                if query_source == "database_repository" and target_hist:
+                    db_ev_id = f"ev-db-marine-{uuid.uuid4().hex[:8]}"
+                    db_evidence = EvidenceRecord(
+                        id=db_ev_id,
+                        source_name="PostgreSQL Marine Repository (ORCA Shared Backend)",
+                        source_uri=f"db://postgres/marine_observations?lat={lat:.2f}&lon={lon:.2f}&radius=100km",
+                        data_type="persisted_marine_observations",
+                        unit="mixed",
+                        metadata={
+                            "record_count": len(target_hist),
+                            "storage": "postgresql_shared_repository",
+                            "station_coverage": "Arabian Sea (Karnataka Offshore)",
+                        },
+                    )
+                    evidence_records.append(db_evidence)
+                    primary_hist_ev_id = db_ev_id
+                elif target_hist:
+                    hist_records, hist_ev, parse_counts = self.historical_loader.load_local_dataset()
+                    evidence_records.append(hist_ev)
+                    primary_hist_ev_id = hist_ev.id
                 else:
-                    limitations.append("Insufficient historical baseline depth (<10 samples) for statistical anomaly detection.")
+                    limitations.append(
+                        f"No historical observation records available within 100km radius of coordinates ({lat:.2f}°N, {lon:.2f}°E)."
+                    )
+                    primary_hist_ev_id = None
+
+                if target_hist and primary_hist_ev_id:
+                    # Clean & validate observations (check physical bounds & deduplicate)
+                    raw_sst = [r.get("sea_surface_temperature_celsius") for r in target_hist]
+                    raw_dates = [r.get("observation_time") for r in target_hist]
+                    clean_sst, clean_dates, clean_issues = filter_and_clean_observations(
+                        values=raw_sst,
+                        timestamps=raw_dates,
+                        variable_name="sea_surface_temperature_celsius",
+                        deduplicate_timestamps=True,
+                    )
+                    limitations.extend(clean_issues)
+
+                    raw_waves = [r.get("wave_height_meters") for r in target_hist]
+                    clean_waves, wave_dates, wave_issues = filter_and_clean_observations(
+                        values=raw_waves,
+                        timestamps=raw_dates,
+                        variable_name="wave_height_meters",
+                        deduplicate_timestamps=True,
+                    )
+                    limitations.extend(wave_issues)
+
+                    # Historical Time-Series Summary with Median & Temporal Gaps
+                    if clean_sst:
+                        sst_stats = compute_series_stats(clean_sst, clean_dates, max_gap_hours=72.0)
+                        gap_count = len(sst_stats["sampling_gaps"])
+                        gap_info = f", with {gap_count} sampling gap(s) > 72h" if gap_count > 0 else ""
+
+                        findings.append(
+                            Finding(
+                                id=f"fnd-hist-sst-{uuid.uuid4().hex[:8]}",
+                                claim=(
+                                    f"Historical sea surface temperature off Karnataka Coast averages {sst_stats['mean']} °C "
+                                    f"(median: {sst_stats['median']} °C, range: {sst_stats['min']} - {sst_stats['max']} °C "
+                                    f"across {sst_stats['count']} records{gap_info})."
+                                ),
+                                value=sst_stats["mean"],
+                                unit="°C",
+                                category=FindingCategory.HISTORICAL_RECORD,
+                                evidence_ids=[primary_hist_ev_id],
+                                uncertainty="Derived from validated multi-season ERA5 / Copernicus Marine reanalysis.",
+                                verification_status=VerificationStatus.UNVERIFIED,
+                            )
+                        )
+
+                    # Seasonal Breakdown Analysis
+                    if len(clean_dates) >= 4 and clean_waves:
+                        seasonal = compute_seasonal_breakdown(clean_dates, clean_waves, min_observations_per_season=2)
+                        for season_name, sstats in seasonal.items():
+                            if sstats["is_adequate_coverage"] and sstats["count"] > 0:
+                                findings.append(
+                                    Finding(
+                                        id=f"fnd-season-{season_name.lower().replace(' ', '-')}-{uuid.uuid4().hex[:6]}",
+                                        claim=(
+                                            f"{season_name} sea state records mean wave height of {sstats['mean']} m "
+                                            f"(median: {sstats['median']} m, max: {sstats['max']} m, count: {sstats['count']})."
+                                        ),
+                                        value=sstats["mean"],
+                                        unit="m",
+                                        category=FindingCategory.DETERMINISTIC_CALCULATION,
+                                        evidence_ids=[primary_hist_ev_id],
+                                        uncertainty=f"Categorized via Arabian Sea meteorological seasons ({sstats['season_definition']}).",
+                                        verification_status=VerificationStatus.UNVERIFIED,
+                                    )
+                                )
+                            elif not sstats["is_adequate_coverage"] and sstats["limitation"]:
+                                limitations.append(sstats["limitation"])
+
+                        # Deterministic Period Comparison: Southwest Monsoon vs. Post-Monsoon
+                        monsoon_waves = [
+                            r["wave_height_meters"] for r in target_hist
+                            if r.get("metadata_json", {}).get("season") == "Southwest Monsoon"
+                            and r.get("wave_height_meters") is not None
+                        ]
+                        post_monsoon_waves = [
+                            r["wave_height_meters"] for r in target_hist
+                            if r.get("metadata_json", {}).get("season") == "Post-Monsoon"
+                            and r.get("wave_height_meters") is not None
+                        ]
+                        if monsoon_waves and post_monsoon_waves:
+                            comp = compare_time_periods(
+                                period_a_values=post_monsoon_waves,
+                                period_b_values=monsoon_waves,
+                                variable_name="wave_height",
+                                unit="m",
+                                period_a_name="Post-Monsoon",
+                                period_b_name="Southwest Monsoon",
+                            )
+                            if comp["valid_comparison"]:
+                                findings.append(
+                                    Finding(
+                                        id=f"fnd-comp-monsoon-{uuid.uuid4().hex[:8]}",
+                                        claim=(
+                                            f"Southwest Monsoon wave heights are {abs(comp['mean_difference'])} m higher "
+                                            f"(median diff: {comp['median_difference']} m, {comp['percentage_change']}% change) "
+                                            f"compared to Post-Monsoon baseline."
+                                        ),
+                                        value=comp["mean_difference"],
+                                        unit="m",
+                                        category=FindingCategory.DETERMINISTIC_CALCULATION,
+                                        evidence_ids=[primary_hist_ev_id],
+                                        uncertainty="Deterministic delta calculated from multi-month seasonal records.",
+                                        verification_status=VerificationStatus.UNVERIFIED,
+                                    )
+                                )
+
+                    # Anomaly check against historical baseline
+                    if len(clean_sst) >= 10:
+                        baseline_sst = clean_sst
+                        anom = detect_anomalies(clean_sst, baseline_sst, threshold_sigma=2.0, min_baseline_samples=10)
+                        if anom["eligible"]:
+                            if anom["anomaly_detected"]:
+                                findings.append(
+                                    Finding(
+                                        id=f"fnd-anom-sst-{uuid.uuid4().hex[:8]}",
+                                        claim=f"Detected {anom['anomaly_count']} sea surface temperature reading(s) exceeding 2.0-sigma baseline variance.",
+                                        value=anom["anomaly_count"],
+                                        unit="occurrences",
+                                        category=FindingCategory.DETERMINISTIC_CALCULATION,
+                                        evidence_ids=[primary_hist_ev_id],
+                                        uncertainty=f"Statistical z-score against baseline mean={anom['baseline_mean']}°C, std={anom['baseline_std_dev']}°C.",
+                                        verification_status=VerificationStatus.UNVERIFIED,
+                                    )
+                                )
+                            else:
+                                findings.append(
+                                    Finding(
+                                        id=f"fnd-anom-none-{uuid.uuid4().hex[:8]}",
+                                        claim=f"No thermal anomalies detected beyond 2.0-sigma threshold relative to the regional scientific baseline.",
+                                        value=0,
+                                        unit="occurrences",
+                                        category=FindingCategory.DETERMINISTIC_CALCULATION,
+                                        evidence_ids=[primary_hist_ev_id],
+                                        uncertainty=f"Validated against {anom['baseline_sample_count']}-sample regional baseline.",
+                                        verification_status=VerificationStatus.UNVERIFIED,
+                                    )
+                                )
+                        else:
+                            limitations.append(anom["limitation"])
+                    else:
+                        limitations.append("Insufficient historical baseline depth (<10 samples) for statistical anomaly detection.")
 
             except Exception as e:
                 errors.append(f"Historical dataset processing error: {str(e)}")
@@ -348,6 +397,36 @@ class OceanResearchAgent(BaseAgent):
         live_obs, live_ev, live_limits = await self.live_client.fetch_marine_data(lat, lon)
         evidence_records.extend(live_ev)
         limitations.extend(live_limits)
+
+        # Ingest live observations into shared PostgreSQL repository if active
+        if live_obs and effective_query_service.repository:
+            try:
+                await effective_query_service.repository.ensure_data_source(
+                    source_id="open_meteo",
+                    name="Open-Meteo Marine API",
+                    base_url="https://marine-api.open-meteo.com/v1/marine",
+                    description="Near-real-time oceanic wave and current numerical model observations",
+                )
+                db_recs = []
+                for p in live_obs:
+                    db_recs.append({
+                        "source_id": "open_meteo",
+                        "observation_time": p.time,
+                        "latitude": p.latitude,
+                        "longitude": p.longitude,
+                        "wave_height_meters": p.wave_height_meters,
+                        "wave_period_seconds": p.wave_period_seconds,
+                        "wave_direction_degrees": p.wave_direction_degrees,
+                        "wind_speed_knots": p.wind_speed_knots,
+                        "wind_direction_degrees": p.wind_direction_degrees,
+                        "chlorophyll_mg_m3": p.chlorophyll_mg_m3,
+                        "metadata_json": {
+                            "ingested_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                    })
+                await effective_query_service.repository.bulk_ingest(db_recs)
+            except Exception as e:
+                limitations.append(f"Persistence of live marine observations to PostgreSQL skipped ({str(e)}).")
 
         if live_obs:
             primary_live_ev_id = live_ev[0].id if live_ev else "ev-live-none"

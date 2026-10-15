@@ -116,8 +116,62 @@ In Phase 4, database integrity was verified in [`test_marine_pipeline.py`](file:
 
 ---
 
+## Shared Backend Integration & Orchestrator Coordination (Phase 5)
+
+In Phase 5, the Ocean Intelligence & Research Agent was fully verified within ORCA's shared backend architecture:
+
+### 1. Shared Invocation Interface
+- **Contract**: Strictly inherits from `BaseAgent` (`backend/app/agents/base.py`) and implements `async def run(self, task: InvestigationTask) -> AgentResult`.
+- **Task Schema**: Accepts `investigation_id`, `workspace`, `prompt`, `latitude`, `longitude`, `target_time`, and `context`.
+- **Status Reporting**: Returns meaningful `AgentStatus` values:
+  - `COMPLETED`: Full research derivation with verified evidence.
+  - `PARTIAL`: Completed calculations alongside disclosed variable limitations (e.g., chlorophyll, salinity).
+  - `UNAVAILABLE`: Target geographic coordinates outside dataset coverage and live data unavailable.
+  - `FAILED`: Invalid geographic coordinates violating WGS84 bounds.
+
+### 2. Orchestrator Integration & Event Flow
+- The agent is registered in `OrchestratorService` under `"ocean_research"`.
+- `OrchestrationPlanner` automatically selects `"ocean_research"` for workspaces: `FISHERMAN`, `MARINE_MONITORING`, `PROTECTED_AREAS`, and marine-related queries in `DISASTER_MANAGEMENT` or `COASTAL_AUTHORITY`.
+- The shared investigation execution flow emits genuine execution events via `EventBus`:
+  - `INVESTIGATION_STARTED`
+  - `AGENT_STARTED` (`ocean_research`)
+  - `EVIDENCE_ADDED`
+  - `AGENT_COMPLETED`
+  - `VERIFICATION_PASSED` / `VERIFICATION_FAILED`
+  - `INVESTIGATION_COMPLETED`
+- Findings are registered in `EvidenceRegistry` and audited by `verify_findings()`.
+
+### 3. PostgreSQL Persistence & Evidence Lineage
+- **Repository Injection Modes**: Supports injection via:
+  1. Constructor: `OceanResearchAgent(marine_repository=repo)`
+  2. Method: `agent.set_repository(repo)`
+  3. Task Context: `task.context = {"repository": repo}` or `task.context = {"session": db_session}`
+- **Database Evidence Lineage**: Persisted historical records return evidence citing `PostgreSQL Marine Repository (ORCA Shared Backend)` with URI format `db://postgres/marine_observations?lat=...&lon=...&radius=100km`.
+- **Live Ingestion Persistence**: Live observations retrieved from Open-Meteo are automatically persisted into `MarineRepository` with `ingested_at` stored separately from `observation_time`.
+- **Database Failure Resiliency**: If PostgreSQL encounters connection or query errors (`OperationalError`), the agent gracefully catches the failure, falls back to the validated offline dataset, and records the limitation without crashing.
+
+---
+
 ## Known Limitations & Boundaries
 - **Optical Ocean Color / Chlorophyll-a**: Chlorophyll measurements require satellite optical radiometry (e.g. MODIS, Sentinel-3 OLCI). They are not present in standard atmospheric/wave forecast feeds and are explicitly disclosed when queried.
 - **Sea Surface Salinity (SSS)**: Requires dedicated satellite salinity sensors (SMOS, SMAP) or Argo profiling floats.
 - **Multi-Decadal Trends**: Inquiries exceeding the active multi-season dataset (June 2025 – May 2026) receive an explicit coverage limitation.
 - **Missing Data**: Missing observations (`None` or `NaN`) are never imputed as zero.
+
+---
+
+## Test Execution Commands
+
+```bash
+# Run all tests (unit + integration, 65 tests total)
+.venv/bin/pytest backend/tests -v
+
+# Run Phase 5 shared backend integration tests
+.venv/bin/pytest backend/tests/integration/test_shared_backend_integration.py -v
+
+# Run Phase 4 scientific validation and resilience tests
+.venv/bin/pytest backend/tests/unit/test_scientific_validation.py backend/tests/unit/test_provider_resilience.py -v
+
+# Run marine pipeline persistence tests
+.venv/bin/pytest backend/tests/integration/test_marine_pipeline.py -v
+```
