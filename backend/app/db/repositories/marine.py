@@ -81,6 +81,25 @@ class MarineRepository:
         existing = res.scalar_one_or_none()
 
         if existing:
+            # Multi-run forecast preservation: if incoming forecast run is different, preserve older run in history
+            incoming_meta = metadata_json or {}
+            existing_meta = dict(existing.metadata_json or {})
+            inc_run = incoming_meta.get("forecast_run_time")
+            prev_run = existing_meta.get("forecast_run_time")
+            if inc_run and prev_run and inc_run != prev_run:
+                history = list(existing_meta.get("prior_forecast_runs", []))
+                history.append({
+                    "forecast_run_time": prev_run,
+                    "retrieval_time": existing_meta.get("retrieval_time"),
+                    "sea_surface_temperature_celsius": existing.sea_surface_temperature_celsius,
+                    "wave_height_meters": existing.wave_height_meters,
+                    "wave_period_seconds": existing.wave_period_seconds,
+                    "wave_direction_degrees": existing.wave_direction_degrees,
+                    "ocean_current_velocity_mps": existing.ocean_current_velocity_mps,
+                    "ocean_current_direction_degrees": existing.ocean_current_direction_degrees,
+                })
+                existing_meta["prior_forecast_runs"] = history
+
             # Preservation of existing non-null fields when incoming values are None (partial updates)
             if sea_surface_temperature_celsius is not None:
                 existing.sea_surface_temperature_celsius = sea_surface_temperature_celsius
@@ -101,9 +120,8 @@ class MarineRepository:
             if chlorophyll_mg_m3 is not None:
                 existing.chlorophyll_mg_m3 = chlorophyll_mg_m3
             if metadata_json:
-                merged_meta = dict(existing.metadata_json or {})
-                merged_meta.update(metadata_json)
-                existing.metadata_json = merged_meta
+                existing_meta.update(metadata_json)
+                existing.metadata_json = existing_meta
             return "updated", existing
         else:
             obs = MarineObservation(
@@ -160,9 +178,9 @@ class MarineRepository:
         min_lat = max(-90.0, latitude - lat_delta)
         max_lat = min(90.0, latitude + lat_delta)
 
-        # Longitude bounding with convergence at high latitudes
+        # Longitude bounding with convergence at high latitudes / polar reaches
         cos_lat = math.cos(math.radians(latitude))
-        if abs(latitude) >= 89.0 or cos_lat < 0.001:
+        if abs(latitude) >= 89.0 or cos_lat < 0.001 or (abs(latitude) + lat_delta >= 90.0):
             lon_delta = 180.0
         else:
             lon_delta = min(180.0, radius_km / (111.32 * cos_lat))

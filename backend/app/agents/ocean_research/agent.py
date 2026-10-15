@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.agents.base import AgentResult, AgentStatus, BaseAgent, InvestigationTask
 from app.agents.ocean_research.calculations import (
@@ -17,7 +17,7 @@ from app.agents.ocean_research.queries import (
 from app.core.config import settings
 from app.db.repositories.marine import MarineRepository
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
-from app.providers.data.open_meteo import OpenMeteoMarineClient
+from app.providers.data.open_meteo import OpenMeteoMarineClient, to_utc_datetime
 from app.providers.llm.base import BaseLLMProvider
 from app.schemas.evidence import (
     EvidenceRecord,
@@ -44,10 +44,12 @@ class OceanResearchAgent(BaseAgent):
         historical_loader: HistoricalMarineDataLoader | None = None,
         marine_repository: MarineRepository | None = None,
         llm_provider: BaseLLMProvider | None = None,
+        demo_mode: bool = False,
     ):
-        self.live_client = live_client or OpenMeteoMarineClient()
+        self.live_client = live_client or OpenMeteoMarineClient(demo_mode=demo_mode)
         self.historical_loader = historical_loader or HistoricalMarineDataLoader()
         self.marine_repository = marine_repository
+        self.demo_mode = demo_mode
         self.query_service = MarineResearchQueryService(
             repository=self.marine_repository,
             historical_loader=self.historical_loader,
@@ -73,6 +75,8 @@ class OceanResearchAgent(BaseAgent):
         evidence_records: list[EvidenceRecord] = []
         limitations: list[str] = []
         errors: list[str] = []
+
+        is_demo_mode = self.demo_mode or bool(task.context.get("demo_mode", False))
 
         # Resolve effective query service (supporting repository or session injected via task context)
         effective_query_service = self.query_service
@@ -143,11 +147,11 @@ class OceanResearchAgent(BaseAgent):
                 loc_a_name = task.context.get("location_name", f"Location A ({lat:.2f}°N, {lon:.2f}°E)")
                 loc_b_name = compare_loc_name or f"Location B ({compare_lat:.2f}°N, {compare_lon:.2f}°E)"
 
-                obs_a, src_a = await effective_query_service.get_observations(lat, lon, radius_km=60.0)
-                obs_b, src_b = await effective_query_service.get_observations(compare_lat, compare_lon, radius_km=60.0)
-                if src_a == "database_fallback" or src_b == "database_fallback":
+                obs_a, src_a = await effective_query_service.get_observations(lat, lon, radius_km=60.0, allow_fixture_fallback=is_demo_mode)
+                obs_b, src_b = await effective_query_service.get_observations(compare_lat, compare_lon, radius_km=60.0, allow_fixture_fallback=is_demo_mode)
+                if src_a == "sample_fixture_demo" or src_b == "sample_fixture_demo":
                     limitations.append(
-                        "Database query failed during location comparison; proceeded using offline historical scientific dataset fallback."
+                        "Location comparison used offline sample fixture data (demo mode)."
                     )
 
                 sst_a = [o["sea_surface_temperature_celsius"] for o in obs_a if o.get("sea_surface_temperature_celsius") is not None]
@@ -224,6 +228,7 @@ class OceanResearchAgent(BaseAgent):
                 "trend", "baseline", "anomaly", "annual", "year", "series", "summary"
             ]
         )
+        hist_query_failed_or_empty = False
 
         if is_historical_inquiry:
             try:
@@ -232,12 +237,18 @@ class OceanResearchAgent(BaseAgent):
                     latitude=lat,
                     longitude=lon,
                     radius_km=100.0,
+                    allow_fixture_fallback=is_demo_mode,
                 )
+                if query_source in ("database_error", "database_empty", "no_repository_configured") or not target_hist:
+                    hist_query_failed_or_empty = True
 
-                if query_source == "database_fallback":
-                    limitations.append(
-                        "PostgreSQL repository query failed; analysis proceeded using offline historical scientific dataset fallback."
-                    )
+                is_demo_hist = query_source == "sample_fixture_demo"
+                hist_prefix = "[SAMPLE FIXTURE / DEMO DATA] " if is_demo_hist else ""
+                hist_uncertainty = (
+                    "DEMO FIXTURE ONLY: Not an authoritative scientific archive or real baseline."
+                    if is_demo_hist
+                    else f"Derived from regional database historical observation series ({query_source})."
+                )
 
                 if query_source == "database_repository" and target_hist:
                     db_ev_id = f"ev-db-marine-{uuid.uuid4().hex[:8]}"
@@ -255,14 +266,30 @@ class OceanResearchAgent(BaseAgent):
                     )
                     evidence_records.append(db_evidence)
                     primary_hist_ev_id = db_ev_id
-                elif target_hist:
+                elif is_demo_hist and target_hist:
                     hist_records, hist_ev, parse_counts = self.historical_loader.load_local_dataset()
                     evidence_records.append(hist_ev)
                     primary_hist_ev_id = hist_ev.id
-                else:
                     limitations.append(
-                        f"No historical observation records available within 100km radius of coordinates ({lat:.2f}°N, {lon:.2f}°E)."
+                        "[SAMPLE FIXTURE / DEMO DATA] Historical analysis utilized offline sample reference fixture. "
+                        "Results represent demonstration data, not an authoritative scientific baseline."
                     )
+                else:
+                    if query_source == "database_empty":
+                        limitations.append(
+                            f"No historical observation records available in database repository within 100km radius of coordinates ({lat:.2f}°N, {lon:.2f}°E). "
+                            "Offline sample fixture was not substituted in production mode."
+                        )
+                    elif query_source == "database_error":
+                        limitations.append(
+                            "Database repository query failed while retrieving historical marine observations. "
+                            "Offline sample fixture was not substituted in production mode."
+                        )
+                    else:
+                        limitations.append(
+                            "Shared marine database repository is not configured. "
+                            "Offline sample fixture was not substituted in production mode."
+                        )
                     primary_hist_ev_id = None
 
                 if target_hist and primary_hist_ev_id:
@@ -296,7 +323,7 @@ class OceanResearchAgent(BaseAgent):
                             Finding(
                                 id=f"fnd-hist-sst-{uuid.uuid4().hex[:8]}",
                                 claim=(
-                                    f"Historical sea surface temperature off {loc_label} averages {sst_stats['mean']} °C "
+                                    f"{hist_prefix}Historical sea surface temperature off {loc_label} averages {sst_stats['mean']} °C "
                                     f"(median: {sst_stats['median']} °C, range: {sst_stats['min']} - {sst_stats['max']} °C "
                                     f"across {sst_stats['count']} records{gap_info})."
                                 ),
@@ -304,7 +331,7 @@ class OceanResearchAgent(BaseAgent):
                                 unit="°C",
                                 category=FindingCategory.HISTORICAL_RECORD,
                                 evidence_ids=[primary_hist_ev_id],
-                                uncertainty=f"Derived from historical observations ({query_source}).",
+                                uncertainty=hist_uncertainty,
                                 verification_status=VerificationStatus.UNVERIFIED,
                             )
                         )
@@ -318,14 +345,14 @@ class OceanResearchAgent(BaseAgent):
                                     Finding(
                                         id=f"fnd-season-{season_name.lower().replace(' ', '-')}-{uuid.uuid4().hex[:6]}",
                                         claim=(
-                                            f"{season_name} sea state records mean wave height of {sstats['mean']} m "
+                                            f"{hist_prefix}{season_name} sea state records mean wave height of {sstats['mean']} m "
                                             f"(median: {sstats['median']} m, max: {sstats['max']} m, count: {sstats['count']})."
                                         ),
                                         value=sstats["mean"],
                                         unit="m",
                                         category=FindingCategory.DETERMINISTIC_CALCULATION,
                                         evidence_ids=[primary_hist_ev_id],
-                                        uncertainty=f"Categorized via Arabian Sea meteorological seasons ({sstats['season_definition']}).",
+                                        uncertainty=hist_uncertainty,
                                         verification_status=VerificationStatus.UNVERIFIED,
                                     )
                                 )
@@ -365,7 +392,7 @@ class OceanResearchAgent(BaseAgent):
                                     Finding(
                                         id=f"fnd-comp-monsoon-{uuid.uuid4().hex[:8]}",
                                         claim=(
-                                            f"Southwest Monsoon wave heights are {diff_desc} "
+                                            f"{hist_prefix}Southwest Monsoon wave heights are {diff_desc} "
                                             f"(median diff: {comp['median_difference']} m, {comp['percentage_change']}% change) "
                                             f"compared to Post-Monsoon baseline."
                                         ),
@@ -373,7 +400,7 @@ class OceanResearchAgent(BaseAgent):
                                         unit="m",
                                         category=FindingCategory.DETERMINISTIC_CALCULATION,
                                         evidence_ids=[primary_hist_ev_id],
-                                        uncertainty="Deterministic delta calculated from multi-month seasonal records.",
+                                        uncertainty=hist_uncertainty,
                                         verification_status=VerificationStatus.UNVERIFIED,
                                     )
                                 )
@@ -409,25 +436,25 @@ class OceanResearchAgent(BaseAgent):
                                 findings.append(
                                     Finding(
                                         id=f"fnd-anom-sst-{uuid.uuid4().hex[:8]}",
-                                        claim=f"Detected {anom['anomaly_count']} sea surface temperature reading(s) exceeding 2.0-sigma baseline variance.",
+                                        claim=f"{hist_prefix}Detected {anom['anomaly_count']} sea surface temperature reading(s) exceeding 2.0-sigma baseline variance.",
                                         value=anom["anomaly_count"],
                                         unit="occurrences",
                                         category=FindingCategory.DETERMINISTIC_CALCULATION,
                                         evidence_ids=[primary_hist_ev_id],
-                                        uncertainty=f"Statistical z-score against baseline mean={anom['baseline_mean']}°C, std={anom['baseline_std_dev']}°C.",
+                                        uncertainty=hist_uncertainty,
                                         verification_status=VerificationStatus.UNVERIFIED,
                                     )
                                 )
                             else:
                                 findings.append(
                                     Finding(
-                                        id=f"fnd-anom-none-{uuid.uuid4().hex[:8]}",
-                                        claim="No thermal anomalies detected beyond 2.0-sigma threshold relative to the regional scientific baseline.",
+                                        id=f"fnd-anom-sst-{uuid.uuid4().hex[:8]}",
+                                        claim=f"{hist_prefix}No sea surface temperature anomalies detected beyond 2.0-sigma variance threshold.",
                                         value=0,
                                         unit="occurrences",
                                         category=FindingCategory.DETERMINISTIC_CALCULATION,
                                         evidence_ids=[primary_hist_ev_id],
-                                        uncertainty=f"Validated against {anom['baseline_sample_count']}-sample regional baseline.",
+                                        uncertainty=hist_uncertainty,
                                         verification_status=VerificationStatus.UNVERIFIED,
                                     )
                                 )
@@ -439,8 +466,30 @@ class OceanResearchAgent(BaseAgent):
             except Exception as e:
                 errors.append(f"Historical dataset processing error: {e!s}")
 
-        # 4. Live Marine Observations Retrieval
-        is_demo_mode = bool(task.context.get("demo_mode", False))
+        # 4. Live Marine Observations Retrieval & Time-Window Filtering
+        now_utc = datetime.now(UTC)
+        target_time = to_utc_datetime(task.target_time)
+        start_time = to_utc_datetime(task.context.get("start_time"))
+        end_time = to_utc_datetime(task.context.get("end_time"))
+        target_date_str = task.context.get("target_date")
+
+        is_past_target = False
+        is_out_of_coverage = False
+
+        if target_time is not None:
+            if target_time < (now_utc - timedelta(days=2)):
+                is_past_target = True
+                limitations.append(
+                    f"Requested target_time ({target_time.isoformat()}) is in the past. "
+                    "Live numerical forecast does not cover historical dates; current forecast was not substituted for past conditions."
+                )
+            elif target_time > (now_utc + timedelta(days=8)):
+                is_out_of_coverage = True
+                limitations.append(
+                    f"Requested target_time ({target_time.isoformat()}) exceeds the 7-day model forecast horizon. "
+                    "Marine forecast is unavailable for this date."
+                )
+
         live_obs, live_ev, live_limits = await self.live_client.fetch_marine_data(lat, lon, demo_mode=is_demo_mode)
         evidence_records.extend(live_ev)
         limitations.extend(live_limits)
@@ -471,7 +520,10 @@ class OceanResearchAgent(BaseAgent):
                         "wind_direction_degrees": p.wind_direction_degrees,
                         "chlorophyll_mg_m3": p.chlorophyll_mg_m3,
                         "metadata_json": {
-                            "ingested_at": datetime.now(UTC).isoformat(),
+                            "ingested_at": now_utc.isoformat(),
+                            "forecast_run_time": now_utc.replace(minute=0, second=0, microsecond=0).isoformat(),
+                            "retrieval_time": now_utc.isoformat(),
+                            "data_nature": "numerical_model_forecast",
                             "is_demo": is_demo_mode,
                         },
                     })
@@ -479,23 +531,48 @@ class OceanResearchAgent(BaseAgent):
             except Exception as e:
                 limitations.append(f"Persistence of live marine observations to PostgreSQL skipped ({e!s}).")
 
-        if live_obs:
+        # Evaluate live forecast only if target time is not past and not out of coverage
+        if live_obs and not is_past_target and not is_out_of_coverage:
             primary_live_ev_id = live_ev[0].id if live_ev else "ev-live-none"
-            raw_live_sst = [p.sea_surface_temperature_celsius for p in live_obs if p.sea_surface_temperature_celsius is not None]
-            raw_live_waves = [p.wave_height_meters for p in live_obs if p.wave_height_meters is not None]
-            raw_live_currents = [p.ocean_current_velocity_mps for p in live_obs if p.ocean_current_velocity_mps is not None]
-            raw_live_winds = [p.wind_speed_knots for p in live_obs if p.wind_speed_knots is not None]
+
+            # Apply requested time constraints
+            if target_time:
+                closest_obs = min(live_obs, key=lambda p: abs((p.time - target_time).total_seconds()))
+                if abs((closest_obs.time - target_time).total_seconds()) <= 5400:
+                    effective_live_obs = [closest_obs]
+                    time_desc = f"at {target_time.strftime('%Y-%m-%d %H:%M UTC')}"
+                else:
+                    effective_live_obs = live_obs
+                    time_desc = f"across {len(live_obs)} forecast hours"
+            elif target_date_str:
+                t_date = datetime.fromisoformat(target_date_str).date()
+                effective_live_obs = [p for p in live_obs if p.time.date() == t_date]
+                time_desc = f"on {target_date_str} (excluding other forecast days)"
+                if not effective_live_obs:
+                    limitations.append(f"No forecast observations available for target date {target_date_str}.")
+            elif start_time and end_time:
+                effective_live_obs = [p for p in live_obs if start_time <= p.time <= end_time]
+                time_desc = f"between {start_time.strftime('%Y-%m-%d %H:%M UTC')} and {end_time.strftime('%Y-%m-%d %H:%M UTC')}"
+            else:
+                effective_live_obs = live_obs
+                time_desc = f"across {len(live_obs)} forecast hours"
+
+            raw_live_sst = [p.sea_surface_temperature_celsius for p in effective_live_obs if p.sea_surface_temperature_celsius is not None]
+            raw_live_waves = [p.wave_height_meters for p in effective_live_obs if p.wave_height_meters is not None]
+            raw_live_currents = [p.ocean_current_velocity_mps for p in effective_live_obs if p.ocean_current_velocity_mps is not None]
+            raw_live_winds = [p.wind_speed_knots for p in effective_live_obs if p.wind_speed_knots is not None]
             prefix = "[DEMO FIXTURE] " if is_demo_mode else ""
             finding_cat = FindingCategory.FORECAST
 
             if raw_live_sst:
                 sst_stats = compute_series_stats(raw_live_sst)
+                count_str = "1 forecast hour" if sst_stats['count'] == 1 else f"{sst_stats['count']} forecast hours"
                 findings.append(
                     Finding(
                         id=f"fnd-live-sst-{uuid.uuid4().hex[:8]}",
                         claim=(
-                            f"{prefix}Near-surface sea temperature model forecast off {loc_label} averages {sst_stats['mean']} °C "
-                            f"(range: {sst_stats['min']} - {sst_stats['max']} °C across {sst_stats['count']} forecast hours)."
+                            f"{prefix}Near-surface sea temperature model forecast off {loc_label} {time_desc} averages {sst_stats['mean']} °C "
+                            f"(range: {sst_stats['min']} - {sst_stats['max']} °C across {count_str})."
                         ),
                         value=sst_stats["mean"],
                         unit="°C",
@@ -512,7 +589,7 @@ class OceanResearchAgent(BaseAgent):
                     Finding(
                         id=f"fnd-live-wave-{uuid.uuid4().hex[:8]}",
                         claim=(
-                            f"{prefix}Wave model forecast off {loc_label} indicates mean significant wave height "
+                            f"{prefix}Wave model forecast off {loc_label} {time_desc} indicates mean significant wave height "
                             f"of {w_stats['mean']} m (median: {w_stats['median']} m, range: {w_stats['min']} - {w_stats['max']} m)."
                         ),
                         value=w_stats["mean"],
@@ -530,7 +607,7 @@ class OceanResearchAgent(BaseAgent):
                     Finding(
                         id=f"fnd-live-current-{uuid.uuid4().hex[:8]}",
                         claim=(
-                            f"{prefix}Ocean current model forecast off {loc_label} indicates mean current velocity "
+                            f"{prefix}Ocean current model forecast off {loc_label} {time_desc} indicates mean current velocity "
                             f"of {c_stats['mean']} m/s (peak: {c_stats['max']} m/s)."
                         ),
                         value=c_stats["mean"],
@@ -548,7 +625,7 @@ class OceanResearchAgent(BaseAgent):
                     Finding(
                         id=f"fnd-live-wind-{uuid.uuid4().hex[:8]}",
                         claim=(
-                            f"{prefix}Offshore surface wind speed averages {wind_stats['mean']} knots "
+                            f"{prefix}Offshore surface wind speed {time_desc} averages {wind_stats['mean']} knots "
                             f"(median: {wind_stats['median']} knots, peak: {wind_stats['max']} knots)."
                         ),
                         value=wind_stats["mean"],
@@ -559,7 +636,7 @@ class OceanResearchAgent(BaseAgent):
                         verification_status=VerificationStatus.UNVERIFIED,
                     )
                 )
-        else:
+        elif not live_obs and not is_past_target and not is_out_of_coverage:
             limitations.append("Live marine observations were not retrieved from external provider.")
 
         # 5. Optional LLM Scientific Synthesis (Preserving Deterministic Results upon Failure)
@@ -595,12 +672,18 @@ class OceanResearchAgent(BaseAgent):
             kw in prompt_lower for kw in ["chlorophyll", "salinity", "5 year", "five year", "decade", "decadal"]
         )
         live_provider_failed = any("Live marine provider unavailable" in lim or "Live provider query error" in lim for lim in limitations)
+        is_only_fixture = bool(findings) and all(
+            "[SAMPLE FIXTURE" in f.claim or "[DEMO FIXTURE]" in f.claim for f in findings
+        )
 
         if errors and not findings:
             status = AgentStatus.FAILED
         elif not findings and not evidence_records:
             status = AgentStatus.UNAVAILABLE
-        elif (prompt_requested_unsupported or live_provider_failed) and findings:
+        elif is_only_fixture:
+            # Do not mark the investigation completed merely because a fixture produced plausible values
+            status = AgentStatus.PARTIAL
+        elif (prompt_requested_unsupported or live_provider_failed or is_past_target or is_out_of_coverage or hist_query_failed_or_empty) and findings:
             status = AgentStatus.PARTIAL
         elif findings:
             status = AgentStatus.COMPLETED

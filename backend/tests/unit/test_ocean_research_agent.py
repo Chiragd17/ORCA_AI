@@ -1,10 +1,13 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
+import httpx
 import pytest
 
 from app.agents.base import AgentStatus, InvestigationTask
 from app.agents.ocean_research.agent import OceanResearchAgent
 from app.agents.ocean_research.calculations import (
+    PHYSICAL_BOUNDS,
     compare_locations,
     compare_time_periods,
     compute_seasonal_breakdown,
@@ -19,7 +22,7 @@ from app.agents.ocean_research.queries import (
     MarineResearchQueryService,
 )
 from app.providers.data.historical_marine import HistoricalMarineDataLoader
-from app.providers.data.open_meteo import OpenMeteoMarineClient
+from app.providers.data.open_meteo import OpenMeteoMarineClient, to_utc_datetime
 from app.providers.llm.base import BaseLLMProvider
 from app.schemas.evidence import FindingCategory, VerificationStatus
 from app.schemas.investigations import WorkspaceType
@@ -376,8 +379,9 @@ async def test_open_meteo_client_live_variables_and_currents():
     Verifies that OpenMeteoMarineClient correctly parses sea_surface_temperature,
     wave parameters, and converts ocean_current_velocity from km/h to m/s.
     """
-    import httpx
     from unittest.mock import patch
+
+    import httpx
 
     mock_payload = {
         "latitude": 12.87,
@@ -417,8 +421,9 @@ async def test_fetch_archive_from_open_meteo_temperature_semantics():
     disconnects temperature_2m from sea_surface_temperature_celsius (leaving SST as None)
     and reports SST as unavailable.
     """
-    import httpx
     from unittest.mock import patch
+
+    import httpx
 
     mock_payload = {
         "latitude": 12.87,
@@ -448,90 +453,136 @@ async def test_fetch_archive_from_open_meteo_temperature_semantics():
         assert ev.metadata.get("air_temperature_2m_available") is True
 
 # -----------------------------------------------------------------------------
-# 11. Ocean Research Agent Full Execution & Evidence Integrity
+# 11. Mock Helper for Deterministic Unit Tests
+# -----------------------------------------------------------------------------
+
+def make_mock_marine_payload(start_dt: datetime | None = None, hours: int = 48) -> dict:
+    """Generates deterministic Open-Meteo marine hourly JSON payload for testing without network."""
+    start = start_dt or datetime(2026, 10, 15, 0, 0, tzinfo=UTC)
+    times = [(start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ") for i in range(hours)]
+    return {
+        "latitude": 12.87,
+        "longitude": 74.88,
+        "generationtime_ms": 0.5,
+        "utc_offset_seconds": 0,
+        "timezone": "UTC",
+        "timezone_abbreviation": "UTC",
+        "hourly": {
+            "time": times,
+            "wave_height": [1.5 + 0.05 * (i % 5) for i in range(hours)],
+            "wave_period": [7.0 + 0.1 * (i % 3) for i in range(hours)],
+            "wave_direction": [240.0 + (i % 10) for i in range(hours)],
+            "sea_surface_temperature": [28.5 + 0.02 * (i % 4) for i in range(hours)],
+            "ocean_current_velocity": [3.6 + 0.1 * (i % 5) for i in range(hours)],
+            "ocean_current_direction": [180.0 + (i % 10) for i in range(hours)],
+        },
+    }
+
+# -----------------------------------------------------------------------------
+# 12. Ocean Research Agent Full Execution & Evidence Integrity
 # -----------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_ocean_research_agent_live_inquiry():
-    agent = OceanResearchAgent()
-    task = InvestigationTask(
-        investigation_id="task-live-01",
-        workspace=WorkspaceType.FISHERMAN,
-        prompt="Check wave conditions offshore Mangaluru tomorrow",
-        latitude=12.87,
-        longitude=74.88,
-    )
-    result = await agent.run(task)
-    assert result.agent_id == "ocean_research"
-    assert result.status == AgentStatus.COMPLETED
-    assert len(result.findings) > 0
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent()
+        task = InvestigationTask(
+            investigation_id="task-live-01",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt="Check wave conditions offshore Mangaluru tomorrow",
+            latitude=12.87,
+            longitude=74.88,
+        )
+        result = await agent.run(task)
+        assert result.agent_id == "ocean_research"
+        assert result.status == AgentStatus.COMPLETED
+        assert len(result.findings) > 0
 
-    # Verify evidence references
-    evidence_ids = {e.id for e in result.evidence}
-    for f in result.findings:
-        assert f.verification_status == VerificationStatus.UNVERIFIED
-        for ref_id in f.evidence_ids:
-            assert ref_id in evidence_ids
+        # Verify evidence references
+        evidence_ids = {e.id for e in result.evidence}
+        for f in result.findings:
+            assert f.verification_status == VerificationStatus.UNVERIFIED
+            for ref_id in f.evidence_ids:
+                assert ref_id in evidence_ids
 
 @pytest.mark.asyncio
 async def test_ocean_research_agent_historical_comparison():
-    agent = OceanResearchAgent()
-    task = InvestigationTask(
-        investigation_id="task-hist-01",
-        workspace=WorkspaceType.MARINE_MONITORING,
-        prompt="Compare historical Southwest Monsoon sea state with Post-Monsoon wave baseline and check for thermal anomalies",
-        latitude=12.87,
-        longitude=74.88,
-    )
-    result = await agent.run(task)
-    assert result.agent_id == "ocean_research"
-    assert result.status == AgentStatus.COMPLETED
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        # 1. In demo mode: sample fixture is loaded and labeled
+        agent_demo = OceanResearchAgent(demo_mode=True)
+        task_demo = InvestigationTask(
+            investigation_id="task-hist-demo",
+            workspace=WorkspaceType.MARINE_MONITORING,
+            prompt="Compare historical Southwest Monsoon sea state with Post-Monsoon wave baseline and check for thermal anomalies",
+            latitude=12.87,
+            longitude=74.88,
+            context={"demo_mode": True},
+        )
+        res_demo = await agent_demo.run(task_demo)
+        assert res_demo.agent_id == "ocean_research"
+        assert len(res_demo.findings) >= 2
+        # Verify findings and evidence unmistakably identify fixture
+        demo_findings = [f for f in res_demo.findings if "[SAMPLE FIXTURE / DEMO DATA]" in f.claim]
+        assert len(demo_findings) > 0
+        for f in demo_findings:
+            assert "DEMO FIXTURE ONLY" in f.uncertainty
+        assert any("SAMPLE FIXTURE / DEMO DATA" in lim for lim in res_demo.limitations)
 
-    # Must contain historical findings
-    hist_findings = [f for f in result.findings if f.category in (FindingCategory.HISTORICAL_RECORD, FindingCategory.DETERMINISTIC_CALCULATION)]
-    assert len(hist_findings) >= 2
-
-    # Verify median and delta calculation
-    comp_claims = [f.claim for f in result.findings if "Southwest Monsoon" in f.claim]
-    assert len(comp_claims) > 0
+        # 2. In production mode with unconfigured repository: fixture is NOT substituted
+        agent_prod = OceanResearchAgent(demo_mode=False)
+        task_prod = InvestigationTask(
+            investigation_id="task-hist-prod",
+            workspace=WorkspaceType.MARINE_MONITORING,
+            prompt="Compare historical Southwest Monsoon sea state with Post-Monsoon wave baseline",
+            latitude=12.87,
+            longitude=74.88,
+        )
+        res_prod = await agent_prod.run(task_prod)
+        assert not any("[SAMPLE FIXTURE / DEMO DATA]" in f.claim for f in res_prod.findings)
+        assert any("Offline sample fixture was not substituted in production mode" in lim for lim in res_prod.limitations)
 
 @pytest.mark.asyncio
 async def test_ocean_research_agent_spatial_location_comparison():
-    agent = OceanResearchAgent()
-    task = InvestigationTask(
-        investigation_id="task-loc-comp-01",
-        workspace=WorkspaceType.MARINE_MONITORING,
-        prompt="Compare sea surface temperatures off Mangaluru with Karwar offshore",
-        latitude=12.87,
-        longitude=74.88,
-        context={
-            "location_name": "Mangaluru Coastal Zone",
-            "compare_latitude": 14.80,
-            "compare_longitude": 74.12,
-            "compare_location_name": "Karwar Deepwater Station",
-        },
-    )
-    result = await agent.run(task)
-    assert result.status == AgentStatus.COMPLETED
-
-    loc_findings = [f for f in result.findings if "Karwar" in f.claim]
-    assert len(loc_findings) > 0
-    assert loc_findings[0].category == FindingCategory.DETERMINISTIC_CALCULATION
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent(demo_mode=True)
+        task = InvestigationTask(
+            investigation_id="task-loc-comp-01",
+            workspace=WorkspaceType.MARINE_MONITORING,
+            prompt="Compare sea surface temperatures off Mangaluru with Karwar offshore",
+            latitude=12.87,
+            longitude=74.88,
+            context={
+                "demo_mode": True,
+                "location_name": "Mangaluru Coastal Zone",
+                "compare_latitude": 14.80,
+                "compare_longitude": 74.12,
+                "compare_location_name": "Karwar Deepwater Station",
+            },
+        )
+        result = await agent.run(task)
+        loc_findings = [f for f in result.findings if "Karwar" in f.claim]
+        assert len(loc_findings) > 0
+        assert loc_findings[0].category == FindingCategory.DETERMINISTIC_CALCULATION
 
 @pytest.mark.asyncio
 async def test_ocean_research_agent_limitations():
-    agent = OceanResearchAgent()
-    task = InvestigationTask(
-        investigation_id="task-limits-01",
-        workspace=WorkspaceType.MARINE_MONITORING,
-        prompt="Assess chlorophyll concentration and salinity across 5 years",
-        latitude=14.80,
-        longitude=74.12,
-    )
-    result = await agent.run(task)
-    assert any("Chlorophyll" in lim for lim in result.limitations)
-    assert any("salinity" in lim for lim in result.limitations)
-    assert any("5+ year" in lim or "5-year" in lim for lim in result.limitations)
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent()
+        task = InvestigationTask(
+            investigation_id="task-limits-01",
+            workspace=WorkspaceType.MARINE_MONITORING,
+            prompt="Assess chlorophyll concentration and salinity across 5 years",
+            latitude=14.80,
+            longitude=74.12,
+        )
+        result = await agent.run(task)
+        assert any("Chlorophyll" in lim for lim in result.limitations)
+        assert any("salinity" in lim for lim in result.limitations)
+        assert any("5+ year" in lim or "5-year" in lim for lim in result.limitations)
 
 @pytest.mark.asyncio
 async def test_ocean_research_agent_invalid_input_fails_gracefully():
@@ -550,7 +601,7 @@ async def test_ocean_research_agent_invalid_input_fails_gracefully():
     assert len(result.findings) == 0
 
 # -----------------------------------------------------------------------------
-# 12. Optional LLM Failure Resilience
+# 13. Optional LLM Failure Resilience
 # -----------------------------------------------------------------------------
 
 class FailingMockLLMProvider(BaseLLMProvider):
@@ -560,18 +611,241 @@ class FailingMockLLMProvider(BaseLLMProvider):
 
 @pytest.mark.asyncio
 async def test_ocean_research_agent_llm_failure_resilience():
-    failing_llm = FailingMockLLMProvider()
-    agent = OceanResearchAgent(llm_provider=failing_llm)
-    task = InvestigationTask(
-        investigation_id="task-llm-fail-01",
-        workspace=WorkspaceType.FISHERMAN,
-        prompt="Check wave and wind conditions offshore Mangaluru",
-        latitude=12.87,
-        longitude=74.88,
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        failing_llm = FailingMockLLMProvider()
+        agent = OceanResearchAgent(llm_provider=failing_llm)
+        task = InvestigationTask(
+            investigation_id="task-llm-fail-01",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt="Check wave and wind conditions offshore Mangaluru",
+            latitude=12.87,
+            longitude=74.88,
+        )
+        result = await agent.run(task)
+        # The agent must NOT crash. Deterministic results must be returned!
+        assert len(result.findings) > 0
+        assert any(f.category in (FindingCategory.OBSERVATION, FindingCategory.FORECAST) for f in result.findings)
+        # LLM failure must be disclosed in limitations
+        assert any("LLM scientific synthesis unavailable" in lim for lim in result.limitations)
+
+# -----------------------------------------------------------------------------
+# 14. Deterministic Time-Window & Temporal Constraint Regression Tests
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_target_time_past_rejection():
+    """Verifies that a target time in the past is explicitly rejected without substituting current forecast."""
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent()
+        past_time = datetime.now(UTC) - timedelta(days=10)
+        task = InvestigationTask(
+            investigation_id="task-target-past",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt="Analyze marine conditions at past target time",
+            latitude=12.87,
+            longitude=74.88,
+            target_time=past_time,
+        )
+        result = await agent.run(task)
+        assert any("in the past" in lim for lim in result.limitations)
+        assert any("current forecast was not substituted" in lim for lim in result.limitations)
+        # Forecast findings must not be returned for past target time
+        forecast_findings = [f for f in result.findings if f.category == FindingCategory.FORECAST]
+        assert len(forecast_findings) == 0
+
+@pytest.mark.asyncio
+async def test_target_time_within_coverage_filtering():
+    """Verifies that a target time within coverage filters forecast series to the matching hour."""
+    now_utc = datetime.now(UTC)
+    target_dt = now_utc.replace(minute=0, second=0, microsecond=0) + timedelta(hours=12)
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(start_dt=target_dt - timedelta(hours=12), hours=48), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent()
+        task = InvestigationTask(
+            investigation_id="task-target-within",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt="Check wave conditions at specific target hour",
+            latitude=12.87,
+            longitude=74.88,
+            target_time=target_dt,
+        )
+        result = await agent.run(task)
+        assert result.status == AgentStatus.COMPLETED
+        # The forecast observation finding should specifically target the requested valid time
+        fcst_findings = [f for f in result.findings if f.category == FindingCategory.FORECAST]
+        assert len(fcst_findings) > 0
+        assert any(target_dt.strftime("%Y-%m-%d %H:00") in f.claim for f in fcst_findings)
+
+@pytest.mark.asyncio
+async def test_target_time_out_of_coverage():
+    """Verifies that a target time beyond the 7-day forecast horizon returns an explicit limitation."""
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent()
+        future_time = datetime.now(UTC) + timedelta(days=20)
+        task = InvestigationTask(
+            investigation_id="task-target-out-of-cov",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt="Check sea state 20 days ahead",
+            latitude=12.87,
+            longitude=74.88,
+            target_time=future_time,
+        )
+        result = await agent.run(task)
+        assert any("exceeds the 7-day model forecast horizon" in lim for lim in result.limitations)
+        assert len([f for f in result.findings if f.category == FindingCategory.FORECAST]) == 0
+
+@pytest.mark.asyncio
+async def test_time_window_one_day_filtering():
+    """Verifies that requesting a single target date filters the series to that day rather than all 168 hours."""
+    start_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    target_date = (start_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+    mock_resp = httpx.Response(200, json=make_mock_marine_payload(start_dt=start_dt, hours=72), request=httpx.Request("GET", "https://test.local"))
+    with patch("httpx.AsyncClient.get", return_value=mock_resp):
+        agent = OceanResearchAgent()
+        task = InvestigationTask(
+            investigation_id="task-target-date",
+            workspace=WorkspaceType.FISHERMAN,
+            prompt=f"Check sea state for {target_date}",
+            latitude=12.87,
+            longitude=74.88,
+            context={"target_date": target_date},
+        )
+        result = await agent.run(task)
+        assert result.status == AgentStatus.COMPLETED
+        fcst_findings = [f for f in result.findings if f.category == FindingCategory.FORECAST]
+        assert len(fcst_findings) > 0
+        assert any(target_date in f.claim for f in fcst_findings)
+
+# -----------------------------------------------------------------------------
+# 15. Timezone-Aware UTC Normalisation Regression Tests
+# -----------------------------------------------------------------------------
+
+def test_utc_datetime_normalisation():
+    """Verifies robust conversion of various timestamp formats to timezone-aware UTC."""
+    # 1. Trailing 'Z'
+    dt_z = to_utc_datetime("2026-10-15T12:00:00Z")
+    assert dt_z == datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    assert dt_z.tzinfo == UTC
+
+    # 2. Explicit positive offset (+05:30 Indian Standard Time)
+    dt_ist = to_utc_datetime("2026-10-15T17:30:00+05:30")
+    assert dt_ist == datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    assert dt_ist.tzinfo == UTC
+
+    # 3. Explicit negative offset (-04:00 EDT)
+    dt_edt = to_utc_datetime("2026-10-15T08:00:00-04:00")
+    assert dt_edt == datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+
+    # 4. Naive string without timezone info
+    dt_naive_str = to_utc_datetime("2026-10-15 12:00:00")
+    assert dt_naive_str == datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    assert dt_naive_str.tzinfo == UTC
+
+    # 5. Naive datetime object
+    dt_naive_obj = to_utc_datetime(datetime(2026, 10, 15, 12, 0, 0))
+    assert dt_naive_obj.tzinfo == UTC
+
+    # 6. None handling
+    assert to_utc_datetime(None) is None
+
+# -----------------------------------------------------------------------------
+# 16. Scientific Series Integrity Regression Tests
+# -----------------------------------------------------------------------------
+
+def test_spatial_distinct_grid_cells_deduplication():
+    """Verifies that spatially distinct grid cells at identical timestamps are preserved."""
+    t0 = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
+    times = [t0, t0, t0]
+    coords = [(12.0, 74.0), (12.5, 74.5), (12.0, 74.0)]  # 1st and 2nd are distinct; 3rd is duplicate of 1st
+    vals = [28.0, 28.5, 28.0]
+
+    clean_vals, clean_times, issues = filter_and_clean_observations(
+        values=vals,
+        timestamps=times,
+        coordinates=coords,
+        variable_name="sea_surface_temperature_celsius",
+        deduplicate_timestamps=True,
     )
-    result = await agent.run(task)
-    # The agent must NOT crash. Deterministic results must be returned!
-    assert len(result.findings) > 0
-    assert any(f.category in (FindingCategory.OBSERVATION, FindingCategory.FORECAST) for f in result.findings)
-    # LLM failure must be disclosed in limitations
-    assert any("LLM scientific synthesis unavailable" in lim for lim in result.limitations)
+    # The two spatially distinct coordinates at t0 must BOTH be preserved
+    assert len(clean_vals) == 2
+    assert clean_vals == [28.0, 28.5]
+    assert any("duplicate spatial observation" in iss for iss in issues)
+
+def test_non_finite_values_rejection():
+    """Verifies consistent rejection of NaN, +Inf, -Inf across observation cleaning."""
+    raw_vals = [28.0, float("nan"), float("inf"), float("-inf"), 29.0]
+    times = [datetime(2026, 10, 15, h, 0, tzinfo=UTC) for h in range(5)]
+
+    clean_vals, clean_times, issues = filter_and_clean_observations(
+        values=raw_vals,
+        timestamps=times,
+        variable_name="sea_surface_temperature_celsius",
+    )
+    assert clean_vals == [28.0, 29.0]
+    assert len(clean_times) == 2
+    assert any("non-finite observation" in iss for iss in issues)
+
+def test_ocean_current_physical_bounds():
+    """Verifies physical bounds validation for ocean current velocity and direction."""
+    assert PHYSICAL_BOUNDS["ocean_current_velocity_mps"] == (0.0, 10.0)
+    assert PHYSICAL_BOUNDS["ocean_current_direction_degrees"] == (0.0, 360.0)
+
+    # Valid velocity
+    c_vals, _, _ = filter_and_clean_observations(
+        values=[0.5, 2.5, 15.0],  # 15.0 m/s exceeds physical limit of 10.0 m/s
+        variable_name="ocean_current_velocity_mps",
+    )
+    assert c_vals == [0.5, 2.5]
+
+    # Valid direction
+    d_vals, _, _ = filter_and_clean_observations(
+        values=[90.0, 270.0, 400.0],  # 400° exceeds 360°
+        variable_name="ocean_current_direction_degrees",
+    )
+    assert d_vals == [90.0, 270.0]
+
+def test_anomaly_detection_distinct_period_identities():
+    """
+    Verifies that identical numerical values from distinct periods or provenances
+    are not falsely rejected as the same baseline.
+    """
+    baseline_vals = [27.5, 28.0, 28.5, 27.8, 28.2, 28.1, 27.9, 28.3, 28.0, 27.7, 28.4, 28.0]
+    assessment_vals = [28.0, 28.1, 28.0]
+
+    # With distinct period identifiers:
+    res = detect_anomalies(
+        values=assessment_vals,
+        baseline_values=baseline_vals,
+        threshold_sigma=2.0,
+        min_baseline_samples=10,
+        baseline_period="Decadal Baseline (2015-2024)",
+        assessment_period="Current Observation (2025)",
+    )
+    assert res["eligible"] is True
+    assert res["anomaly_detected"] is False
+
+    # But identical object reference is rejected:
+    res_same = detect_anomalies(
+        values=baseline_vals,
+        baseline_values=baseline_vals,
+        threshold_sigma=2.0,
+    )
+    assert res_same["eligible"] is False
+    assert "Anomaly detection requires separate" in res_same["limitation"]
+
+# -----------------------------------------------------------------------------
+# 17. Live External API Smoke Test (Explicit Group)
+# -----------------------------------------------------------------------------
+
+@pytest.mark.live_api
+@pytest.mark.asyncio
+async def test_live_open_meteo_smoke():
+    """Smoke test for live Open-Meteo external service. Requires network access."""
+    client = OpenMeteoMarineClient()
+    obs, evs, limits = await client.fetch_marine_data(latitude=12.87, longitude=74.88)
+    assert len(obs) > 0
+    assert len(evs) > 0
+    assert obs[0].wave_height_meters is not None

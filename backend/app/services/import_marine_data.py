@@ -60,6 +60,58 @@ async def import_historical_marine_data(dataset_path: str | None = None) -> dict
         }
 
 
+async def import_marine_archive_data(
+    latitude: float,
+    longitude: float,
+    start_date: str,
+    end_date: str,
+) -> dict[str, Any]:
+    """
+    Fetches genuine historical marine observations from Open-Meteo Marine API
+    and ingests them idempotently into the shared PostgreSQL database.
+    """
+    loader = HistoricalMarineDataLoader()
+    records, evidence, limitations = await loader.fetch_marine_archive(
+        latitude=latitude,
+        longitude=longitude,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if not records or not evidence:
+        return {
+            "status": "failed",
+            "error": "Failed to retrieve records from Open-Meteo Marine Historical Archive",
+            "limitations": limitations,
+        }
+
+    try:
+        async with AsyncSessionLocal() as session:
+            repo = MarineRepository(session)
+            await repo.ensure_data_source(
+                source_id="open_meteo_marine_archive",
+                name=evidence.source_name,
+                base_url=evidence.source_uri,
+                description="Open-Meteo Marine historical oceanographic reanalysis/hindcast",
+                license_info=evidence.metadata.get("license"),
+            )
+            ingest_summary = await repo.bulk_ingest(records)
+            status = "failed" if ingest_summary["failed"] > 0 else "success"
+            return {
+                "source_id": "open_meteo_marine_archive",
+                "sample_count": len(records),
+                "ingest_summary": ingest_summary,
+                "status": status,
+                "limitations": limitations,
+            }
+    except Exception as e:
+        logger.error(f"Database ingestion of marine archive failed: {e}")
+        return {
+            "source_id": "open_meteo_marine_archive",
+            "error": str(e),
+            "status": "failed",
+        }
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else None
     result = asyncio.run(import_historical_marine_data(path))

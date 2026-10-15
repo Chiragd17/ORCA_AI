@@ -1,10 +1,12 @@
 import pytest
-from app.agents.base import BaseAgent, InvestigationTask, AgentResult, AgentStatus
-from app.agents.ocean_research.agent import OceanResearchAgent
-from app.agents.marine_hazard.agent import MarineHazardAgent
+
+from app.agents.base import AgentResult, AgentStatus, BaseAgent, InvestigationTask
 from app.agents.coastal_risk.agent import CoastalRiskAgent
 from app.agents.evidence_verification.agent import EvidenceVerificationAgent
+from app.agents.marine_hazard.agent import MarineHazardAgent
+from app.agents.ocean_research.agent import OceanResearchAgent
 from app.schemas.investigations import WorkspaceType
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_cls, expected_id", [

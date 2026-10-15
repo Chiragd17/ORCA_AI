@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.agents.base import AgentStatus, InvestigationTask
@@ -11,8 +12,6 @@ from app.providers.data.historical_marine import HistoricalMarineDataLoader
 from app.schemas.evidence import FindingCategory
 from app.schemas.investigations import WorkspaceType
 
-
-from sqlalchemy import event
 
 @pytest.fixture
 async def in_memory_db():
@@ -322,6 +321,7 @@ async def test_import_marine_data_mismatched_source_id_fails_truthfully(in_memor
     """
     from contextlib import asynccontextmanager
     from unittest.mock import patch
+
     from app.services.import_marine_data import import_historical_marine_data
 
     @asynccontextmanager
@@ -418,18 +418,18 @@ async def test_marine_repository_partial_update_field_preservation(in_memory_db:
 
 
 @pytest.mark.asyncio
-async def test_marine_repository_concurrency_and_repetition(in_memory_db: AsyncSession):
+async def test_marine_repository_sequential_repeated_and_overlapping_batches(in_memory_db: AsyncSession):
     """
-    Regression test: tests repeated ingestion idempotency and multi-batch ingestion
+    Regression test: tests repeated sequential ingestion idempotency and multi-batch ingestion
     using identical and overlapping batches.
     """
     repo = MarineRepository(in_memory_db)
-    await repo.ensure_data_source("concurrent_source", "Concurrency Testing Source")
+    await repo.ensure_data_source("sequential_test_source", "Sequential Batch Testing Source")
 
     t_base = datetime(2026, 10, 15, 0, 0, tzinfo=UTC)
     batch = [
         {
-            "source_id": "concurrent_source",
+            "source_id": "sequential_test_source",
             "observation_time": t_base.replace(hour=h),
             "latitude": 12.0 + h * 0.1,
             "longitude": 74.0 + h * 0.1,
@@ -453,7 +453,7 @@ async def test_marine_repository_concurrency_and_repetition(in_memory_db: AsyncS
     # Overlapping batch with partially new, partially existing records
     overlapping_batch = [
         {
-            "source_id": "concurrent_source",
+            "source_id": "sequential_test_source",
             "observation_time": t_base.replace(hour=h),
             "latitude": 12.0 + h * 0.1,
             "longitude": 74.0 + h * 0.1,
@@ -531,13 +531,66 @@ async def test_postgresql_real_db_foreign_key_and_uniqueness():
     Test suite for genuine PostgreSQL database operations when configured.
     Verifies actual PostgreSQL UNIQUE constraint enforcement and Foreign Key error handling.
     """
-    from app.db.session import engine
-    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
 
-    async with engine.connect() as conn:
-        res = await conn.execute(text("SELECT version();"))
-        version = res.scalar()
-        assert "PostgreSQL" in version
+    from app.db.base import Base
+    from app.db.session import async_session_maker, engine
+
+    # Create approved tables on the actual PostgreSQL instance if not present
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with async_session_maker() as session:
+        repo = MarineRepository(session)
+        source_id = "real_pg_verified_source"
+        await repo.ensure_data_source(source_id, "Real PostgreSQL Verified Source")
+
+        t_obs = datetime(2026, 10, 15, 8, 0, tzinfo=UTC)
+
+        # 1. Insert valid observation
+        rec_valid = {
+            "source_id": source_id,
+            "observation_time": t_obs,
+            "latitude": 13.0,
+            "longitude": 74.5,
+            "sea_surface_temperature_celsius": 29.1,
+            "wave_height_meters": 1.7,
+        }
+        upserted = await repo.upsert_observation(rec_valid)
+        assert upserted.id is not None
+        assert upserted.wave_height_meters == 1.7
+
+        # 2. Reject record with unknown source_id (foreign key violation)
+        rec_invalid_fk = {
+            "source_id": "non_existent_source_id_9999",
+            "observation_time": t_obs,
+            "latitude": 13.0,
+            "longitude": 74.5,
+            "wave_height_meters": 1.9,
+        }
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                await repo.upsert_observation(rec_invalid_fk)
+
+        # 3. Verify unique constraint & upsert: updating the same valid entity
+        rec_update = {
+            "source_id": source_id,
+            "observation_time": t_obs,
+            "latitude": 13.0,
+            "longitude": 74.5,
+            "sea_surface_temperature_celsius": 29.4,
+            "wave_height_meters": 1.85,  # calibrated value
+            "forecast_run_time": datetime(2026, 10, 15, 6, 0, tzinfo=UTC),
+        }
+        refreshed = await repo.upsert_observation(rec_update)
+        assert refreshed.id == upserted.id
+        assert refreshed.wave_height_meters == 1.85
+        assert refreshed.sea_surface_temperature_celsius == 29.4
+
+        # Verify only 1 record exists at this point
+        all_obs = await repo.query_observations(13.0, 74.5, radius_km=10.0)
+        matching = [o for o in all_obs if o.source_id == source_id and o.observation_time == t_obs]
+        assert len(matching) == 1
 
 
 

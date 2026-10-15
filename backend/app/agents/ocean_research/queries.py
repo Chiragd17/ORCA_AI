@@ -142,12 +142,17 @@ class MarineResearchQueryService:
         radius_km: float = 50.0,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
+        allow_fixture_fallback: bool = False,
     ) -> tuple[list[dict[str, Any]], str]:
         """
         Retrieves observation records for a given geographic point and radius.
         Returns:
-            (records, source_type) where source_type is 'database_repository',
-            'database_fallback', or 'historical_dataset'.
+            (records, source_type) where source_type is:
+            - 'database_repository': records from real database
+            - 'database_empty': database exists and was queried, but 0 records matched
+            - 'database_error': database query failed with an exception
+            - 'no_repository_configured': no repository configured
+            - 'sample_fixture_demo': explicitly requested or allowed demo/test fixture
         """
         if self.repository:
             try:
@@ -179,23 +184,37 @@ class MarineResearchQueryService:
                             "metadata_json": obs.metadata_json or {},
                         })
                     return normalized, "database_repository"
+                else:
+                    if allow_fixture_fallback:
+                        fallback = self._filter_historical_records(
+                            latitude=latitude,
+                            longitude=longitude,
+                            radius_km=radius_km,
+                            start_time=start_time,
+                            end_time=end_time,
+                        )
+                        return fallback, "sample_fixture_demo"
+                    return [], "database_empty"
             except Exception:
-                # Disclose repository query failure and fall back safely to local historical scientific archive
-                fallback = self._filter_historical_records(
-                    latitude=latitude,
-                    longitude=longitude,
-                    radius_km=radius_km,
-                    start_time=start_time,
-                    end_time=end_time,
-                )
-                return fallback, "database_fallback"
+                if allow_fixture_fallback:
+                    fallback = self._filter_historical_records(
+                        latitude=latitude,
+                        longitude=longitude,
+                        radius_km=radius_km,
+                        start_time=start_time,
+                        end_time=end_time,
+                    )
+                    return fallback, "sample_fixture_demo"
+                return [], "database_error"
 
-        # Fallback to local historical scientific dataset
-        filtered = self._filter_historical_records(
-            latitude=latitude,
-            longitude=longitude,
-            radius_km=radius_km,
-            start_time=start_time,
-            end_time=end_time,
-        )
-        return filtered, "historical_dataset"
+        if allow_fixture_fallback:
+            filtered = self._filter_historical_records(
+                latitude=latitude,
+                longitude=longitude,
+                radius_km=radius_km,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            return filtered, "sample_fixture_demo"
+
+        return [], "no_repository_configured"

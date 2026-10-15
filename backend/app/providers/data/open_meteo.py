@@ -11,6 +11,29 @@ from app.schemas.evidence import EvidenceRecord
 from app.schemas.marine import MarineObservationPoint
 
 
+def to_utc_datetime(dt_val: datetime | str | None) -> datetime | None:
+    """
+    Normalizes any datetime or ISO string to a timezone-aware UTC datetime.
+    Correctly handles strings with 'Z', explicit positive/negative offsets,
+    and timezone-naive strings (assuming UTC as documented by provider).
+    """
+    if dt_val is None:
+        return None
+    if isinstance(dt_val, str):
+        s = dt_val.strip()
+        if s.endswith("Z") or s.endswith("z"):
+            dt = datetime.fromisoformat(s[:-1] + "+00:00")
+        elif "+" in s[10:] or ("-" in s[10:] and s.count("-") > 2):
+            dt = datetime.fromisoformat(s)
+        else:
+            dt = datetime.fromisoformat(s).replace(tzinfo=UTC)
+    else:
+        dt = dt_val
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 class OpenMeteoMarineClient:
     """
     Client for Open-Meteo Marine API.
@@ -86,12 +109,15 @@ class OpenMeteoMarineClient:
             current_directions = hourly.get("ocean_current_direction", [])
 
             ev_id = f"ev-om-live-{uuid.uuid4().hex[:10]}"
+            first_obs_time = to_utc_datetime(times[0]) if times else None
+            fetch_time = datetime.now(UTC)
+
             evidence = EvidenceRecord(
                 id=ev_id,
                 source_name="Open-Meteo Marine API",
                 source_uri=query_url,
-                observation_time=datetime.fromisoformat(times[0].replace("Z", "+00:00")) if times else None,
-                retrieval_time=datetime.now(UTC),
+                observation_time=first_obs_time,
+                retrieval_time=fetch_time,
                 latitude=latitude,
                 longitude=longitude,
                 data_type="marine_wave_current_series",
@@ -101,6 +127,8 @@ class OpenMeteoMarineClient:
                     "status": "live_query",
                     "params": params,
                     "data_nature": "numerical_model_forecast",
+                    "time_nature": "forecast_valid_time",
+                    "forecast_reference_time": fetch_time.isoformat(),
                     "is_sensor_observation": False,
                     "model_source": "Open-Meteo Marine numerical model forecast (auto-selected best-match)",
                     "current_velocity_samples": len(current_velocities),
@@ -110,8 +138,7 @@ class OpenMeteoMarineClient:
             evidence_records.append(evidence)
 
             for i in range(len(times)):
-                t_str = times[i]
-                dt = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+                dt = to_utc_datetime(times[i])
                 # Open-Meteo ocean_current_velocity is in km/h -> convert to m/s: 1 km/h = 1/3.6 m/s
                 curr_kmh = current_velocities[i] if i < len(current_velocities) and current_velocities[i] is not None else None
                 curr_mps = round(curr_kmh / 3.6, 3) if curr_kmh is not None else None
@@ -140,7 +167,7 @@ class OpenMeteoMarineClient:
         except Exception as e:
             if effective_demo:
                 logger.warning(f"Live Open-Meteo query failed ({e!s}). Demo mode enabled: loading labelled sample fixture.")
-                limitations.append(f"Live provider query error: {e!s}. Using SAMPLE FIXTURE / DEMO DATA (offline demonstration mode).")
+                limitations.append(f"Live marine provider unavailable ({e!s}). Using SAMPLE FIXTURE / DEMO DATA (offline demonstration mode).")
                 observations, evidence_records = self._load_scientific_fixture(latitude, longitude, is_demo=True)
             else:
                 logger.warning(f"Live Open-Meteo query failed ({e!s}). Returning empty observations with limitation.")

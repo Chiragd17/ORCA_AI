@@ -202,32 +202,38 @@ GROQ_MODEL=llama-3.3-70b-versatile
 
 ## Data Ingestion & Persistence Instructions
 
-### 1. Historical Dataset Ingestion
-Run the bulk ingestion service from the command line:
-```bash
-# Run from repository root
-.venv/bin/python -m app.services.import_marine_data
-```
-Or specify a custom processed JSON dataset path:
-```bash
-.venv/bin/python -m app.services.import_marine_data data/processed/arabian_sea_historical_2025_2026.json
-```
-- **Idempotency**: Ingestion enforces a unique constraint on `(source_id, observation_time, latitude, longitude)`. Re-running the command updates existing rows in place without duplicating records.
-- **Diagnostics**: The command outputs a structured JSON report showing total processed, valid, inserted, updated, and failed counts.
-
-### 2. Live Marine Ingestion
-Live data can be queried and ingested via:
-- **FastAPI Endpoint**:
-  ```bash
-  curl "http://127.0.0.1:8000/api/v1/marine/observations?lat=12.87&lon=74.88"
-  ```
-- **Programmatic Service**:
+### 1. Genuine Historical Marine Dataset Ingestion
+The platform supports a verified, genuine historical marine dataset path via Open-Meteo Marine Reanalysis API:
+- **API Endpoint**: `https://marine-api.open-meteo.com/v1/marine` with `start_date` and `end_date` parameters.
+- **Variables**: Genuine reanalysis hourly Sea Surface Temperature (SST, °C), Significant Wave Height (m), Wave Period (s), Wave Direction (°), and Ocean Current Velocity (converted from km/h to m/s) & Direction (°).
+- **License**: Creative Commons Attribution 4.0 International (CC BY 4.0).
+- **Usage**:
   ```python
-  from app.providers.data.open_meteo import OpenMeteoMarineClient
-  client = OpenMeteoMarineClient()
-  obs, evidence, limitations = await client.fetch_marine_data(latitude=12.87, longitude=74.88)
+  from app.services.import_marine_data import import_marine_archive_data
+  # Ingest 3 days of historical marine reanalysis for Mangaluru Offshore
+  summary = await import_marine_archive_data(
+      latitude=12.87,
+      longitude=74.88,
+      start_date="2024-06-01",
+      end_date="2024-06-03",
+  )
   ```
-- **Automatic Ingestion**: When the `OceanResearchAgent` runs with an active repository, live observations are automatically persisted to PostgreSQL with distinct `observation_time` and `ingested_at` timestamps.
+
+### 2. Demonstration Fixture (Demo / Test Isolation Only)
+The local 23-record dataset (`data/processed/arabian_sea_historical_2025_2026.json`) is strictly a demonstration fixture.
+- **Production Non-Substitution**: Normal production queries never fall back to this fixture. If the database repository is unconfigured, empty, or fails, the agent reports an explicit limitation and status (`PARTIAL` or `UNAVAILABLE`).
+- **Unmistakable Labelling**: In explicit demo mode (`context={"demo_mode": True}` or `agent = OceanResearchAgent(demo_mode=True)`), all findings and evidence are explicitly prefixed with `[SAMPLE FIXTURE / DEMO DATA]` and tagged with uncertainty denoting demo status.
+- **No False Completion**: Investigations derived from sample fixtures are assigned `AgentStatus.PARTIAL`, never `COMPLETED`.
+
+### 3. Forecast Persistence Semantics
+- **Valid Time vs Run Time**: The current database schema stores observation/valid time in `observation_time`.
+- **Run Overwrite Prevention**: When repeated forecast runs are ingested for the same valid time, `MarineRepository.upsert_observation` checks `forecast_run_time`. If the run time differs, prior forecast values and run references are preserved in `metadata_json["prior_forecast_runs"]` rather than silently erased.
+
+### 4. Time-Window Filtering & Temporal Constraints
+- **Multi-day vs Target Hour**: When `target_time` is specified, the agent filters the live forecast horizon to that specific valid hour rather than summarizing all 168 hours.
+- **Single-Day Filter**: When `target_date` is provided, observations are filtered strictly to that 24-hour window.
+- **Past Target Time**: If `target_time` is in the past (> 2 days ago), the agent outputs an explicit limitation explaining that live forecasts cannot cover historical periods, and never quietly substitutes the current forecast.
+- **Out of Coverage**: Target times exceeding 8 days ahead return an explicit limitation noting that they exceed the 7-day model forecast horizon.
 
 ---
 
@@ -235,8 +241,9 @@ Live data can be queried and ingested via:
 
 | Symptom | Root Cause | Built-in Resolution / Behaviour |
 |---|---|---|
-| `FATAL: password authentication failed for user` | PostgreSQL credentials incorrect or PostgreSQL server not running | Safe fallback: Agent catches error, uses offline validated scientific dataset, and reports limitation. |
-| `Live provider query error: ConnectError / 504 Timeout` | External network offline or Open-Meteo downtime | Fallback: Agent loads labelled scientific baseline fixture (`is_fixture=True`) and notes the error in limitations. |
+| Database repository unconfigured or empty | No PostgreSQL connection or empty database | Production mode: Agent outputs transparent limitation, never substitutes sample fixture, and returns `PARTIAL` or `UNAVAILABLE`. |
+| Database query error (`OperationalError`) | PostgreSQL server downtime or network disconnect | Production mode: Discloses failure in limitations; does not substitute sample fixture. Demo mode: Falls back to labelled fixture with `[SAMPLE FIXTURE / DEMO DATA]`. |
+| `Live provider query error: ConnectError / 504 Timeout` | External network offline or Open-Meteo downtime | Fallback: Agent outputs limitation noting live provider unavailability, avoids fabricating values, and assigns `PARTIAL`. |
 | `Unsupported marine variable 'chlorophyll'` | Optical sensor feeds unavailable on meteorological APIs | Clear disclosure: Agent produces supported findings and assigns `AgentStatus.PARTIAL` with a transparent limitation notice. |
 | `Invalid geographic coordinates: lat=120.0` | Coordinate exceeds WGS84 physical boundaries | Immediate rejection: Agent returns `AgentStatus.FAILED` with explicit validation error without making API calls. |
 
@@ -245,17 +252,14 @@ Live data can be queried and ingested via:
 ## Test Execution Commands
 
 ```bash
-# Run all 66 unit and integration tests
-.venv/bin/pytest backend/tests -v
+# Run all unit and integration tests (deterministic, no external network needed)
+.venv312/bin/pytest backend/tests -v
 
-# Run Phase 5 shared backend integration tests
-.venv/bin/pytest backend/tests/integration/test_shared_backend_integration.py -v
+# Run live Open-Meteo external service smoke test (requires network access)
+.venv312/bin/pytest backend/tests/unit/test_ocean_research_agent.py -m live_api -v
 
-# Run marine pipeline persistence and historical import tests
-.venv/bin/pytest backend/tests/integration/test_marine_pipeline.py -v
-
-# Run Phase 4 scientific validation and provider resilience tests
-.venv/bin/pytest backend/tests/unit/test_scientific_validation.py backend/tests/unit/test_provider_resilience.py -v
+# Run real PostgreSQL integration tests (requires live PostgreSQL and RUN_REAL_POSTGRES_TESTS=1)
+RUN_REAL_POSTGRES_TESTS=1 .venv312/bin/pytest backend/tests/integration/test_marine_pipeline.py -k test_postgresql_real_db_foreign_key_and_uniqueness -v
 ```
 
 ---
@@ -266,6 +270,10 @@ The Ocean Intelligence & Research Agent is fully implemented and passes all unit
 
 | Blocker ID | Affected Component | Responsible Owner | Nature & Description | Action Required |
 |---|---|---|---|---|
-| **BLOCKER-01** | `backend/alembic/versions/` | Shared Database / Schema Owner | Missing Alembic migration revisions. The directory currently only contains `.gitkeep`. Although SQLAlchemy models exist in `backend/app/models/`, no versioned migration file exists to reproducibly create or migrate the PostgreSQL database. | Generate and commit the baseline Alembic revision (e.g. `alembic revision --autogenerate -m "initial_schema"`). |
-| **BLOCKER-02** | `backend/app/orchestrator/service.py` | Orchestrator / Platform Owner | Orchestrator state is stored in in-memory dictionaries (`_investigations`, `_event_buses`, `_evidence_registries`) instead of persisting investigations, status events, and agent findings to PostgreSQL across application restarts. | Implement database persistence in `OrchestratorService` and inject `MarineRepository` or `AsyncSession` into `InvestigationTask.context`. |
+| **BLOCKER-01** | `backend/alembic/versions/` | Shared Database / Schema Owner | Missing initial Alembic migration. The directory currently only contains `.gitkeep`. Although SQLAlchemy models exist in `backend/app/models/`, no versioned migration file exists to reproducibly create or migrate the PostgreSQL database. | Generate and commit the baseline Alembic revision (e.g. `alembic revision --autogenerate -m "initial_schema"`). |
+| **BLOCKER-02** | `backend/app/models/marine.py` | Shared Database / Schema Owner | Forecast-run schema uniqueness. Current table unique constraint is `(source_id, observation_time, latitude, longitude)`, which conflates forecast run time with valid observation time. | Propose updating table schema to include `forecast_run_time` column and include it in uniqueness constraint so multiple forecast model runs can be stored natively in separate rows. |
+| **BLOCKER-03** | `backend/app/orchestrator/service.py` | Orchestrator / Platform Owner | Orchestrator default construction of `OceanResearchAgent` without repository injection. In `OrchestratorService`, agents are instantiated with default empty parameters (`self.ocean_agent = OceanResearchAgent()`), leaving the database repository unconfigured. | Inject shared `MarineRepository` or `AsyncSession` into `OceanResearchAgent` in `OrchestratorService.__init__` or pass via `task.context["session"]`. |
+| **BLOCKER-04** | `backend/app/orchestrator/service.py` | Orchestrator / Platform Owner | Orchestrator state is stored in in-memory dictionaries (`_investigations`, `_event_buses`, `_evidence_registries`) instead of persisting investigations, status events, and agent findings to PostgreSQL across application restarts. | Implement database persistence in `OrchestratorService` to persist investigations and evidence records to PostgreSQL tables. |
+| **BLOCKER-05** | `backend/app/evidence/verification.py` | Evidence Verification Owner | Flawed verification semantics: `verify_findings` marks findings `VERIFIED` solely because the cited evidence ID exists in `EvidenceRegistry`, confusing reference existence with empirical ground truth or scientific validity. | Enhance verification logic to evaluate provenance, data quality flags, and sensor type rather than solely reference existence. |
+| **BLOCKER-06** | `backend/tests/integration/test_marine_pipeline.py` | Shared DevOps / CI Owner | No automated CI PostgreSQL environment configured. Real PostgreSQL integration test `test_postgresql_real_db_foreign_key_and_uniqueness` is truthfully skipped when `RUN_REAL_POSTGRES_TESTS != 1`. SQLite tests with FK enforcement enabled pass, but cannot serve as proof of PostgreSQL operation. | Provision a CI PostgreSQL service container and configure `RUN_REAL_POSTGRES_TESTS=1` in CI test pipeline. |
 

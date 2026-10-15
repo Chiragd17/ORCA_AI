@@ -8,6 +8,8 @@ PHYSICAL_BOUNDS: dict[str, tuple[float, float]] = {
     "wave_height_meters": (0.0, 35.0),
     "wave_period_seconds": (0.5, 35.0),
     "wave_direction_degrees": (0.0, 360.0),
+    "ocean_current_velocity_mps": (0.0, 10.0),
+    "ocean_current_direction_degrees": (0.0, 360.0),
     "wind_speed_knots": (0.0, 200.0),
     "wind_direction_degrees": (0.0, 360.0),
     "chlorophyll_mg_m3": (0.0, 100.0),
@@ -61,14 +63,15 @@ def validate_geographic_coordinates(latitude: float | None, longitude: float | N
 def filter_and_clean_observations(
     values: list[Any],
     timestamps: list[datetime] | None = None,
+    coordinates: list[tuple[float, float]] | None = None,
     variable_name: str | None = None,
     deduplicate_timestamps: bool = True,
 ) -> tuple[list[float], list[datetime], list[str]]:
     """
     Cleans an observation series:
-    - Rejects non-numeric, None, and NaN values.
+    - Rejects non-numeric, None, NaN, and infinite values.
     - Rejects values exceeding physical realistic limits for known marine variables.
-    - Optionally eliminates duplicate observation timestamps (keeping earliest valid).
+    - Deduplicates identical spatial measurements (preserves spatially distinct grid cells at the same timestamp).
     - Returns cleaned (values, timestamps, limitations/warnings).
     Missing observations are NEVER treated as zero.
     """
@@ -77,14 +80,16 @@ def filter_and_clean_observations(
     issues: list[str] = []
 
     bounds = PHYSICAL_BOUNDS.get(variable_name) if variable_name else None
-    seen_timestamps = set()
+    seen_keys = set()
 
     has_times = timestamps is not None and len(timestamps) == len(values)
+    has_coords = coordinates is not None and len(coordinates) == len(values)
 
     for idx, raw_val in enumerate(values):
         t = timestamps[idx] if has_times else None
+        c = coordinates[idx] if has_coords else None
 
-        # Check for None / NaN / non-numeric
+        # Check for None / NaN / Infinity / non-numeric
         if raw_val is None:
             continue
         if not isinstance(raw_val, (int, float)):
@@ -92,6 +97,7 @@ def filter_and_clean_observations(
             continue
         val = float(raw_val)
         if math.isnan(val) or math.isinf(val):
+            issues.append(f"Ignored non-finite observation ({val}) at index {idx}.")
             continue
 
         # Check physical plausibility bounds
@@ -103,13 +109,21 @@ def filter_and_clean_observations(
                 )
                 continue
 
-        # Check timestamp deduplication
+        # Check spatial and timestamp deduplication
         if t is not None and deduplicate_timestamps:
             t_iso = t.isoformat()
-            if t_iso in seen_timestamps:
-                issues.append(f"Ignored duplicate timestamp observation at {t_iso}.")
-                continue
-            seen_timestamps.add(t_iso)
+            if c is not None:
+                # Spatially distinct grid cells at same valid time are preserved
+                dedup_key = (t_iso, round(c[0], 4), round(c[1], 4))
+                if dedup_key in seen_keys:
+                    issues.append(f"Ignored duplicate spatial observation at {dedup_key}.")
+                    continue
+            else:
+                dedup_key = t_iso
+                if dedup_key in seen_keys:
+                    issues.append(f"Ignored duplicate timestamp at {t_iso}.")
+                    continue
+            seen_keys.add(dedup_key)
 
         cleaned_vals.append(val)
         if t is not None:
@@ -409,11 +423,15 @@ def detect_anomalies(
     min_baseline_samples: int = 10,
     variable_name: str = "variable",
     unit: str = "",
+    assessment_period: str | None = None,
+    baseline_period: str | None = None,
+    provenance_assessment: str | None = None,
+    provenance_baseline: str | None = None,
 ) -> dict[str, Any]:
     """
     Detects potential oceanographic anomalies against a designated baseline.
     Requires minimum sample depth (min_baseline_samples >= 10) to prevent unwarranted anomaly claims.
-    Requires evaluation sample and baseline to be separate datasets.
+    Requires evaluation sample and baseline to be separate datasets based on period identities and provenance.
     """
     if not values:
         return {
@@ -423,14 +441,33 @@ def detect_anomalies(
             "limitation": "Insufficient assessment samples (0 provided) for anomaly detection.",
         }
 
-    # Anomaly detection cannot evaluate the baseline against itself
-    if values is baseline_values or (len(values) == len(baseline_values) and values == baseline_values):
+    # 1. Reject identical object reference
+    if values is baseline_values:
         return {
             "has_anomaly": False,
             "anomaly_detected": False,
             "eligible": False,
             "limitation": "Anomaly detection requires separate baseline and assessment periods; evaluation sample cannot be identical to the baseline.",
         }
+
+    # 2. Check period and provenance identities
+    if assessment_period and baseline_period and assessment_period == baseline_period:
+        return {
+            "has_anomaly": False,
+            "anomaly_detected": False,
+            "eligible": False,
+            "limitation": f"Anomaly detection requires distinct temporal periods; assessment period '{assessment_period}' matches baseline period.",
+        }
+
+    # If no period or provenance is specified and values are identical, reject as unproven distinctness
+    if not assessment_period and not baseline_period and not provenance_assessment and not provenance_baseline:
+        if len(values) == len(baseline_values) and values == baseline_values:
+            return {
+                "has_anomaly": False,
+                "anomaly_detected": False,
+                "eligible": False,
+                "limitation": "Anomaly detection requires separate baseline and assessment periods; evaluation sample cannot be identical to the baseline.",
+            }
 
     baseline_stats = compute_series_stats(baseline_values)
     if baseline_stats["count"] < min_baseline_samples:

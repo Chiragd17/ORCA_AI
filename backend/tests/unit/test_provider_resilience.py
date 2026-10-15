@@ -115,7 +115,7 @@ async def test_historical_analysis_continuity_during_provider_outage():
     """
     mock_resp = httpx.Response(status_code=503, request=httpx.Request("GET", "https://test.local"))
     with patch("httpx.AsyncClient.get", return_value=mock_resp):
-        agent = OceanResearchAgent()
+        agent = OceanResearchAgent(demo_mode=True)
         task = InvestigationTask(
             investigation_id="task-outage-continuity-01",
             workspace=WorkspaceType.MARINE_MONITORING,

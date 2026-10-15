@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -21,8 +22,6 @@ from app.schemas.investigations import (
     WorkspaceType,
 )
 
-
-from sqlalchemy import event
 
 @pytest.fixture
 async def shared_db_session():
@@ -163,12 +162,31 @@ async def test_database_failure_graceful_fallback_and_limitation(shared_db_sessi
         longitude=74.88,
     )
 
+    # 1. In production mode: database failure must NOT silently substitute fixture
     result = await agent.run(task)
-    assert result.status == AgentStatus.COMPLETED
-    assert len(result.findings) > 0
+    assert result.status in (AgentStatus.PARTIAL, AgentStatus.UNAVAILABLE)
+    # Ensure no findings were fabricated from sample fixture in production mode
+    fixture_findings = [f for f in result.findings if "SAMPLE FIXTURE" in f.claim]
+    assert len(fixture_findings) == 0
+    # Ensure limitation discloses database failure and non-substitution
+    assert any("Database repository query failed" in lim for lim in result.limitations)
+    assert any("Offline sample fixture was not substituted in production mode" in lim for lim in result.limitations)
 
-    # Ensure limitation discloses database fallback
-    assert any("PostgreSQL repository query failed" in lim for lim in result.limitations)
+    # 2. In explicit demo mode: fixture is permitted but unmistakably labelled
+    task_demo = InvestigationTask(
+        investigation_id="inv-db-err-demo-004",
+        workspace=WorkspaceType.MARINE_MONITORING,
+        prompt="Historical sea state and wave height comparison",
+        latitude=12.87,
+        longitude=74.88,
+        context={"demo_mode": True},
+    )
+    res_demo = await agent.run(task_demo)
+    demo_findings = [f for f in res_demo.findings if "[SAMPLE FIXTURE / DEMO DATA]" in f.claim]
+    assert len(demo_findings) > 0
+    for f in demo_findings:
+        assert "DEMO FIXTURE ONLY" in f.uncertainty
+    assert any("SAMPLE FIXTURE / DEMO DATA" in lim for lim in res_demo.limitations)
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,7 @@ class HistoricalMarineDataLoader:
             raw_data = json.load(f)
 
         meta = raw_data.get("dataset_metadata", {})
-        source_name = meta.get("source_name", "Historical Marine Scientific Archive")
+        source_name = "[SAMPLE FIXTURE / DEMO DATA] " + meta.get("source_name", "Arabian Sea Reference Sample Fixture")
         source_url = meta.get("source_url", str(path))
 
         ev_id = f"ev-hist-{uuid.uuid4().hex[:10]}"
@@ -66,8 +66,10 @@ class HistoricalMarineDataLoader:
                 "spatial_resolution": meta.get("spatial_resolution"),
                 "is_historical": True,
                 "is_sample_fixture": True,
-                "data_nature": meta.get("data_nature", "sample_reference_fixture"),
+                "is_demo": True,
+                "data_nature": "sample_reference_fixture",
                 "is_authoritative_bulk_archive": False,
+                "scientific_baseline_suitable": False,
             },
         )
 
@@ -252,4 +254,119 @@ class HistoricalMarineDataLoader:
 
         except Exception as e:
             limitations.append(f"Historical archive query failed ({e!s}).")
+            return [], None, limitations
+
+    async def fetch_marine_archive(
+        self,
+        latitude: float,
+        longitude: float,
+        start_date: str,
+        end_date: str,
+        timeout: float = 15.0,
+    ) -> tuple[list[dict[str, Any]], EvidenceRecord | None, list[str]]:
+        """
+        Queries Open-Meteo Marine API for genuine historical oceanographic reanalysis/hindcast records.
+        Retrieves real sea-surface temperature, wave dynamics (height, period, direction),
+        and ocean currents (velocity, direction).
+        Endpoint: https://marine-api.open-meteo.com/v1/marine
+        License: Creative Commons Attribution 4.0 International (CC BY 4.0).
+        Units: °C, m, s, deg, m/s (velocity converted from km/h).
+        """
+        limitations: list[str] = []
+        marine_url = "https://marine-api.open-meteo.com/v1/marine"
+        params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "start_date": start_date,
+            "end_date": end_date,
+            "hourly": [
+                "sea_surface_temperature",
+                "wave_height",
+                "wave_period",
+                "wave_direction",
+                "ocean_current_velocity",
+                "ocean_current_direction",
+            ],
+            "timezone": "UTC",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(marine_url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+
+            hourly = data.get("hourly", {})
+            times = hourly.get("time", [])
+            ssts = hourly.get("sea_surface_temperature", [])
+            wave_heights = hourly.get("wave_height", [])
+            wave_periods = hourly.get("wave_period", [])
+            wave_directions = hourly.get("wave_direction", [])
+            current_velocities = hourly.get("ocean_current_velocity", [])
+            current_directions = hourly.get("ocean_current_direction", [])
+
+            ev_id = f"ev-marine-hist-{uuid.uuid4().hex[:10]}"
+            obs_dt = datetime.fromisoformat(times[0].replace("Z", "+00:00")) if times else None
+            if obs_dt and obs_dt.tzinfo is None:
+                obs_dt = obs_dt.replace(tzinfo=UTC)
+
+            evidence = EvidenceRecord(
+                id=ev_id,
+                source_name="Open-Meteo Marine Historical Archive",
+                source_uri=f"{marine_url}?latitude={latitude}&longitude={longitude}&start_date={start_date}&end_date={end_date}",
+                observation_time=obs_dt,
+                retrieval_time=datetime.now(UTC),
+                latitude=latitude,
+                longitude=longitude,
+                data_type="historical_marine_reanalysis",
+                value={"sample_count": len(times), "start_date": start_date, "end_date": end_date},
+                unit="°C, m, s, deg, m/s",
+                metadata={
+                    "dataset": "Open-Meteo Marine Global Ocean Hindcast/Reanalysis",
+                    "is_historical": True,
+                    "is_sample_fixture": False,
+                    "data_nature": "oceanographic_reanalysis",
+                    "license": "Creative Commons Attribution 4.0 International (CC BY 4.0)",
+                    "sea_surface_temperature_available": True,
+                    "wave_dynamics_available": True,
+                    "ocean_currents_available": True,
+                },
+            )
+
+            records = []
+            for i in range(len(times)):
+                t_str = times[i]
+                dt = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+
+                curr_kmh = current_velocities[i] if i < len(current_velocities) and current_velocities[i] is not None else None
+                curr_mps = round(curr_kmh / 3.6, 3) if curr_kmh is not None else None
+                curr_dir = current_directions[i] if i < len(current_directions) and current_directions[i] is not None else None
+
+                records.append({
+                    "source_id": "open_meteo_marine_archive",
+                    "observation_time": dt,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "sea_surface_temperature_celsius": ssts[i] if i < len(ssts) and ssts[i] is not None else None,
+                    "wave_height_meters": wave_heights[i] if i < len(wave_heights) and wave_heights[i] is not None else None,
+                    "wave_period_seconds": wave_periods[i] if i < len(wave_periods) and wave_periods[i] is not None else None,
+                    "wave_direction_degrees": wave_directions[i] if i < len(wave_directions) and wave_directions[i] is not None else None,
+                    "ocean_current_velocity_mps": curr_mps,
+                    "ocean_current_direction_degrees": curr_dir,
+                    "wind_speed_knots": None,
+                    "wind_direction_degrees": None,
+                    "chlorophyll_mg_m3": None,
+                    "metadata_json": {
+                        "is_historical": True,
+                        "evidence_id": ev_id,
+                        "source": "open_meteo_marine_archive",
+                    },
+                })
+
+            return records, evidence, limitations
+
+        except Exception as e:
+            limitations.append(f"Historical marine archive query failed ({e!s}).")
             return [], None, limitations
