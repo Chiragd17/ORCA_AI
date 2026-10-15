@@ -3,7 +3,7 @@
 ## Overview
 The **Ocean Intelligence & Research Agent** (`ocean_research`) performs deterministic analysis of marine conditions, sea-surface temperatures (SST), wave spectra, ocean currents, seasonal cycles, and thermal anomaly baselines. It utilizes the ORCA hybrid marine data architecture combining:
 1. **Historical Reanalysis Data**: Curated seasonal reference sample fixture (`data/processed/arabian_sea_historical_2025_2026.json` providing representative Karnataka offshore baseline ranges).
-2. **Live Ingestion Feeds**: Near-real-time atmospheric and wave observations via Open-Meteo Marine API.
+2. **Numerical Marine Model Feeds**: Near-real-time atmospheric and wave model forecasts via Open-Meteo Marine API.
 3. **Persistent Data Layer**: PostgreSQL `marine_observations` and `data_sources` accessed via `MarineRepository`.
 
 ---
@@ -147,25 +147,25 @@ In Phase 5, the Ocean Intelligence & Research Agent was fully verified within OR
   2. Method: `agent.set_repository(repo)`
   3. Task Context: `task.context = {"repository": repo}` or `task.context = {"session": db_session}`
 - **Database Evidence Lineage**: Persisted historical records return evidence citing `PostgreSQL Marine Repository (ORCA Shared Backend)` with URI format `db://postgres/marine_observations?lat=...&lon=...&radius=100km`.
-- **Live Ingestion Persistence**: Live observations retrieved from Open-Meteo are automatically persisted into `MarineRepository` with `ingested_at` stored separately from `observation_time`.
+- **Live Ingestion Persistence**: Numerical wave model forecast data retrieved from Open-Meteo are persisted into `MarineRepository` with `ingested_at` stored separately from `observation_time`.
 - **Database Failure Resiliency**: If PostgreSQL encounters connection or query errors (`OperationalError`), the agent gracefully catches the failure, falls back to the validated offline dataset, and records the limitation without crashing.
 
 ---
 
 ## Data Sources Catalog & Specifications
 
-| Attribute | Source 1: Curated Reference Sample Fixture | Source 2: Near-Real-Time Live Ingestion Feed |
+| Attribute | Source 1: Curated Reference Sample Fixture | Source 2: Numerical Wave Model Forecast Feed |
 |---|---|---|
 | **Provider / Dataset Name** | Arabian Sea Regional Reference Sample Fixture (Curated Benchmark / ERA5 Representative Baseline) | Open-Meteo Marine API |
 | **Dataset Identifier / URL** | `arabian-sea-benchmark-sample-2025-2026` (`data/processed/arabian_sea_historical_2025_2026.json`) | `https://marine-api.open-meteo.com/v1/marine` |
 | **Supported Variables** | Sea surface temperature, wave height, wave period, wave direction, wind speed | Wave height, wave period, wave direction, ocean current velocity, current direction |
 | **Geographic Coverage** | Karnataka Coast / Arabian Sea Offshore (Mangaluru 12.87°N, 74.88°E & Karwar 14.80°N, 74.12°E) | Global marine grid (WGS84 lat: [-90, 90], lon: [-180, 180]) |
-| **Temporal Coverage** | Discrete seasonal samples across 2025-06-01 to 2026-05-31 (23 discrete benchmark records) | Near-real-time hourly forecast (7-day window) |
+| **Temporal Coverage** | Discrete seasonal samples across 2025-06-01 to 2026-05-31 (23 discrete benchmark records) | Near-real-time hourly numerical wave model forecast (7-day window) |
 | **Measurement Units** | SST (°C), Wave Height (m), Wave Period (s), Wave Direction (deg), Wind Speed (knots) | Wave Height (m), Wave Period (s), Direction (deg), Current (m/s) |
 | **Licensing** | Public Domain / Testing & Benchmark Sample Fixture | Open-Meteo Non-Commercial / Attribution Required |
 | **Required Credentials** | None (public local processed dataset `data/processed/...`) | None (public non-commercial tier); optional API key for high throughput |
 | **Publication Frequency** | Static curated test fixture for deterministic testing and baseline validation | Updated every 1 to 3 hours from GFS/ECMWF numerical wave models |
-| **Known Limitations** | Not an exhaustive or continuous scientific archive; represents 23 discrete offshore sample points | Excludes optical chlorophyll-a; SST is proxied/reanalyzed |
+| **Known Limitations** | Not an exhaustive or continuous scientific archive; represents 23 discrete offshore sample points | Excludes optical chlorophyll-a; values are numerical wave/ocean model forecasts and estimates rather than direct in-situ buoy sensor observations |
 | **Verification Status** | **100% Verified**: Processed records validated against physical bounds and ingested idempotently | **100% Verified**: Tested live via HTTP 200 OK and resilient under 429/500/503/timeout simulations |
 
 ---

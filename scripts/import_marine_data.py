@@ -3,7 +3,7 @@
 ORCA Marine Data Ingestion CLI (Person 1 Ownership).
 Idempotently fetches, validates, and persists marine observations into PostgreSQL.
 Supports:
-    --live           : Fetch live observations from Open-Meteo Marine API
+    --live           : Fetch numerical model wave/current forecasts from Open-Meteo Marine API
     --historical     : Ingest curated seasonal baseline reference sample fixture
     --use-fixture    : Ingest offline baseline fixture
 """
@@ -72,7 +72,7 @@ async def run_ingestion(lat: float, lon: float, mode: str, custom_file: str | No
     else:  # live
         client = OpenMeteoMarineClient()
         obs, ev_list, limits = await client.fetch_marine_data(lat, lon)
-        print(f"Retrieved {len(obs)} live observation points from Open-Meteo Marine API.")
+        print(f"Retrieved {len(obs)} numerical model forecast points from Open-Meteo Marine API.")
         for lim in limits:
             print(f"  [Notice] {lim}")
         source_id = "open_meteo"

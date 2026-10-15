@@ -14,8 +14,9 @@ from app.schemas.marine import MarineObservationPoint
 class OpenMeteoMarineClient:
     """
     Client for Open-Meteo Marine API.
-    Provides real-time, short-term forecast, and recent historical marine observations:
-    wave height, period, direction, currents, and sea temperature proxies.
+    Provides numerical wave and ocean current model forecasts, recent model estimates,
+    and marine atmospheric proxies: wave height, period, direction, and ocean current velocity.
+    Note: Values represent numerical weather/wave model outputs (ECMWF/GFS), not direct in-situ sensor measurements.
     """
     def __init__(self, base_url: str | None = None, timeout_seconds: float = 12.0):
         self.base_url = base_url or settings.OPEN_METEO_BASE_URL
@@ -29,7 +30,7 @@ class OpenMeteoMarineClient:
         end_date: str | None = None,
     ) -> tuple[list[MarineObservationPoint], list[EvidenceRecord], list[str]]:
         """
-        Retrieves marine observations for given coordinates.
+        Retrieves numerical wave and ocean model forecast data for given coordinates.
         Returns:
             (observations, evidence_records, limitations)
         """
@@ -89,6 +90,9 @@ class OpenMeteoMarineClient:
                 metadata={
                     "status": "live_query",
                     "params": params,
+                    "data_nature": "numerical_model_forecast_and_estimate",
+                    "is_sensor_observation": False,
+                    "model_source": "ECMWF/GFS numerical wave and ocean model",
                     "current_velocity_samples": len(current_velocities),
                 },
             )
@@ -101,7 +105,7 @@ class OpenMeteoMarineClient:
                     time=dt,
                     latitude=latitude,
                     longitude=longitude,
-                    # Note: Open-Meteo Marine API focuses on waves/currents; SST can be joined or proxied
+                    # Note: Open-Meteo Marine API provides numerical model forecasts for waves/currents
                     wave_height_meters=wave_heights[i] if i < len(wave_heights) else None,
                     wave_period_seconds=wave_periods[i] if i < len(wave_periods) else None,
                     wave_direction_degrees=wave_directions[i] if i < len(wave_directions) else None,
@@ -110,6 +114,7 @@ class OpenMeteoMarineClient:
                 observations.append(point)
 
             limitations.append("Chlorophyll observations are unavailable through Open-Meteo Marine API.")
+            limitations.append("Open-Meteo values represent numerical model forecasts and estimates rather than direct in-situ buoy/sensor measurements.")
 
         except Exception as e:
             logger.warning(f"Live Open-Meteo query failed ({e!s}). Falling back to scientific archive fixture.")
@@ -149,7 +154,11 @@ class OpenMeteoMarineClient:
             data_type="marine_observation_baseline",
             value={"sample_count": len(times)},
             unit="°C, m, s, knots",
-            metadata={"is_fixture": True, "fixture_file": fixture_path.name},
+            metadata={
+                "is_fixture": True,
+                "fixture_file": fixture_path.name,
+                "data_nature": "offline_reference_sample_fixture",
+            },
         )
 
         obs = []

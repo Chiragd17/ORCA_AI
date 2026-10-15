@@ -76,9 +76,9 @@ async def test_shared_task_invocation_and_result_schema():
 
 
 @pytest.mark.asyncio
-async def test_persisted_postgres_evidence_reference_integrity(shared_db_session: AsyncSession):
+async def test_persisted_repository_evidence_reference_integrity(shared_db_session: AsyncSession):
     """
-    3. Marine repository access against persisted records
+    3. Marine repository access against persisted records (using isolated SQLite session mimicking shared repository schema)
     4. Evidence references in returned findings referencing persisted DB evidence
     """
     repo = MarineRepository(shared_db_session)
