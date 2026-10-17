@@ -558,6 +558,16 @@ async def test_postgresql_real_db_foreign_key_and_uniqueness():
 
         t_obs = datetime(2026, 10, 15, 8, 0, tzinfo=UTC)
 
+        # Ensure isolated state for test record across repeated test runs
+        from sqlalchemy import delete
+        await session.execute(
+            delete(MarineObservation).where(
+                MarineObservation.source_id == source_id,
+                MarineObservation.observation_time == t_obs,
+            )
+        )
+        await session.commit()
+
         # 3. Insert and query a valid record
         rec_valid = {
             "source_id": source_id,

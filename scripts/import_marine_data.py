@@ -53,10 +53,10 @@ async def run_ingestion(
         print("-" * 70)
         print("Historical Marine Reanalysis Ingestion Report:")
         for k, v in result.items():
-            print(f"  • {k}: {v}")
+            print(f"  - {k}: {v}")
         print("-" * 70)
         if result.get("status") == "success":
-            print("✓ Genuine historical reanalysis ingested successfully.")
+            print("[OK] Genuine historical reanalysis ingested successfully.")
         else:
             print(f"[Warning/Failure] Ingestion did not succeed: {result.get('error') or result.get('status')}")
         return
@@ -73,9 +73,9 @@ async def run_ingestion(
         print(f"Loading sample fixture from: {loader.data_path}")
         validated_records, evidence, parse_counts = loader.load_local_dataset()
         print("Fixture Validation Summary:")
-        print(f"  • Total Read   : {parse_counts['processed']}")
-        print(f"  • Valid Format : {parse_counts['valid']}")
-        print(f"  • Rejected     : {parse_counts['rejected']}")
+        print(f"  - Total Read   : {parse_counts['processed']}")
+        print(f"  - Valid Format : {parse_counts['valid']}")
+        print(f"  - Rejected     : {parse_counts['rejected']}")
         records = validated_records
         source_id = "historical_archive"
         source_name = evidence.source_name
@@ -130,18 +130,20 @@ async def run_ingestion(
             counts = await repo.bulk_ingest(records)
             print("-" * 70)
             print("PostgreSQL Database Ingestion Report:")
-            print(f"  • Processed : {counts['processed']}")
-            print(f"  • Inserted  : {counts['inserted']}")
-            print(f"  • Updated   : {counts['updated']} (Idempotent updates)")
-            print(f"  • Failed    : {counts['failed']}")
+            print(f"  - Processed : {counts['processed']}")
+            print(f"  - Inserted  : {counts['inserted']}")
+            print(f"  - Updated   : {counts['updated']} (Idempotent updates)")
+            print(f"  - Failed    : {counts['failed']}")
             print("-" * 70)
-            print("✓ Database ingestion executed successfully.")
+            print("[OK] Database ingestion executed successfully.")
     except Exception as e:  # noqa: BLE001
         print(f"\n[PostgreSQL Status] Database write unavailable ({e}).")
         print("Pipeline verified in decoupled/offline mode.")
 
 
 def main():
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     parser = argparse.ArgumentParser(description="ORCA Marine Data Ingestion Tool")
     parser.add_argument("--lat", type=float, default=12.87, help="Latitude in WGS84 (default: 12.87 Mangaluru)")
     parser.add_argument("--lon", type=float, default=74.88, help="Longitude in WGS84 (default: 74.88)")
